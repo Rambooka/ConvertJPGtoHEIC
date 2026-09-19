@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Adaptive icon foreground: a photo, with a badge saying it is being made smaller.
+
+  Everything sits inside the central 66dp safe circle (x and y between 21 and 87), because the
+  launcher may mask the 108dp square down to a circle and anything outside that is cut off.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Photo card. -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M28,24h40a6,6 0 0 1 6,6v32a6,6 0 0 1 -6,6h-40a6,6 0 0 1 -6,-6v-32a6,6 0 0 1 6,-6z" />
+
+    <!-- Sun. -->
+    <path
+        android:fillColor="#FF2F6BFF"
+        android:pathData="M37.5,36a4.5,4.5 0 1,1 -9,0a4.5,4.5 0 1,1 9,0z" />
+
+    <!-- Hills, sitting on an inset baseline so the card keeps a white border. -->
+    <path
+        android:fillColor="#FF2F6BFF"
+        android:pathData="M26,63L38,46L46,55L57,41L70,63Z" />
+
+    <!-- White ring, so the badge reads as a separate layer over the card corner. -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M71,69m-15,0a15,15 0 1,0 30,0a15,15 0 1,0 -30,0z" />
+
+    <!-- Badge. -->
+    <path
+        android:fillColor="#FFF59E0B"
+        android:pathData="M71,69m-13,0a13,13 0 1,0 26,0a13,13 0 1,0 -26,0z" />
+
+    <!-- Down arrow: smaller file. -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M68.5,61h5v7h4.5L71,77L64,68h4.5z" />
+</vector>

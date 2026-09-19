@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Themed-icon layer (Android 13+). The system throws the colours away and tints by alpha, so this
+  has to work as a flat silhouette: an outlined card rather than a filled one, and the arrow kept
+  clear of the card instead of overlapping it, or the two would merge into a blob.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Photo card, drawn as a frame. -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="5"
+        android:strokeLineJoin="round"
+        android:pathData="M30,24h34a6,6 0 0 1 6,6v24a6,6 0 0 1 -6,6h-34a6,6 0 0 1 -6,-6v-24a6,6 0 0 1 6,-6z" />
+
+    <!-- Sun. -->
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M36.5,32a3.5,3.5 0 1,1 -7,0a3.5,3.5 0 1,1 7,0z" />
+
+    <!-- Hills. -->
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M29,54L39,42L46,49L55,38L65,54Z" />
+
+    <!-- Down arrow, sitting below the card so the shapes stay separate when tinted flat. -->
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M66,64h6v8h5L69,82L61,72h5z" />
+</vector>

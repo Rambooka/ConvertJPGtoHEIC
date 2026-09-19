@@ -1,0 +1,69 @@
+<resources>
+    <string name="app_name">Convert JPG to HEIC by Ray</string>
+
+    <string name="section_range">Date range</string>
+    <string name="section_options">Options</string>
+
+    <string name="pick_range">Pick date range</string>
+    <string name="range_none">No range selected</string>
+    <string name="range_title">Photos taken between</string>
+
+    <string name="opt_only_smaller">Only keep the HEIC if it is smaller</string>
+    <string name="opt_skip_existing">Skip photos already converted</string>
+    <string name="opt_skip_lossy">Skip motion photos</string>
+    <string name="opt_skip_lossy_hint">Converting a motion photo discards its embedded video for
+        good. Leave this on unless you only want the still.</string>
+    <string name="opt_delete_originals">Delete originals after converting</string>
+
+    <string name="action_dry_run">Dry run</string>
+    <string name="action_dry_run_hint">Converts in memory to measure the real saving. Nothing is
+        added to your gallery and no original is deleted.</string>
+    <string name="action_convert">Convert</string>
+    <string name="action_cleanup">Clean up leftovers</string>
+    <string name="action_cleanup_hint">Finds JPGs in this range that already have a HEIC beside
+        them — left behind by a run that was cancelled or whose delete prompt was declined.</string>
+    <string name="action_cancel">Cancel</string>
+
+    <string name="permission_needed">This app needs full access to your photos. Tap to grant it.</string>
+    <string name="permission_partial">Only selected photos are shared with this app, so a date
+        range cannot be scanned. Tap to allow access to all photos.</string>
+    <string name="permission_location">Location data is hidden from this app, so GPS tags will be
+        lost during conversion. Tap to allow it.</string>
+    <string name="no_encoder">This device has no HEIC (HEVC) encoder, so nothing can be converted.</string>
+
+    <string name="storage_free">Storage: %1$s free</string>
+    <string name="pending_delete">Next deletion prompt: %1$d of %2$d</string>
+    <string name="run_counters">Skipped: motion %1$d · other %2$d · failed %3$d</string>
+
+    <string name="quality_label">HEIC quality: %1$d</string>
+    <string name="pick_range_first">Pick a date range first.</string>
+    <string name="service_start_failed">Could not start the conversion. Reopen the app and try
+        again.</string>
+    <string name="already_running">Already working. Wait for it to finish.</string>
+    <string name="finish_deletion_first">Finish the pending deletion before starting another run.</string>
+    <string name="scanning">Scanning…</string>
+    <string name="scan_none">No JPGs found in this range.</string>
+    <string name="scan_summary">%1$d JPGs · %2$s</string>
+    <string name="progress_measuring">Measuring %1$d of %2$d\n%3$s</string>
+    <string name="progress_converting">Converting %1$d of %2$d\n%3$s</string>
+    <plurals name="awaiting_deletion_low_space">
+        <item quantity="one">Storage is low. Confirm deleting %1$d original to carry on.</item>
+        <item quantity="other">Storage is low. Confirm deleting %1$d originals to carry on.</item>
+    </plurals>
+    <plurals name="awaiting_deletion">
+        <item quantity="one">Waiting for you to confirm deleting %1$d original.
+This frees the
+            space for the rest of the run.</item>
+        <item quantity="other">Waiting for you to confirm deleting %1$d originals.
+This frees
+            the space for the rest of the run.</item>
+    </plurals>
+    <string name="progress_cleanup">Looking for leftovers…</string>
+
+    <string name="confirm_title">Convert and delete?</string>
+    <string name="confirm_delete_button">Convert and delete</string>
+    <string name="confirm_keep_button">Convert, keep originals</string>
+    <string name="cleanup_title">Delete leftover originals?</string>
+    <string name="cleanup_message">Every JPG this finds already has a HEIC beside it in the same
+        folder. You will be asked to confirm before anything is deleted.</string>
+</resources>

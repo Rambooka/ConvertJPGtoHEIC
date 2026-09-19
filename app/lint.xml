@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<lint>
+    <!--
+      Selected Photos Access is deliberately not supported. The whole point of this app is to scan
+      a date range across the library, which a hand-picked subset cannot answer. MainActivity
+      detects a partial grant and tells the user to switch to full access instead of silently
+      reporting "no photos found".
+    -->
+    <issue id="SelectedPhotoAccess" severity="ignore" />
+</lint>
