@@ -10,6 +10,7 @@ import android.util.Log
 import android.provider.Settings as AndroidSettings
 import android.text.format.Formatter
 import android.view.View
+import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -22,6 +23,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.example.convertjpgtoheic.databinding.ActivityMainBinding
+import com.example.convertjpgtoheic.databinding.ItemFailedPhotoBinding
 import com.google.android.material.datepicker.MaterialDatePicker
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.flow.collectLatest
@@ -51,6 +53,28 @@ class MainActivity : AppCompatActivity() {
         if (!engine.hasPendingDeletion) ConversionService.clearCompletionNotification(this)
     }
 
+    /**
+     * The failed photo whose system delete dialog is on screen, paired with its row, so the row can
+     * be removed once the delete is confirmed. Separate from [deleteLauncher] because this is an
+     * ad-hoc single delete from the report, not part of the run's batched deletion sequence.
+     */
+    private var pendingFailureDelete: Pair<FailedPhoto, View>? = null
+
+    private val failureDeleteLauncher = registerForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        val pending = pendingFailureDelete
+        pendingFailureDelete = null
+        if (result.resultCode == RESULT_OK && pending != null) {
+            val (failure, row) = pending
+            binding.failuresList.removeView(row)
+            if (binding.failuresList.childCount == 0) binding.failuresHeading.isVisible(false)
+            Toast.makeText(this, getString(R.string.deleted_one, failure.name), Toast.LENGTH_SHORT)
+                .show()
+            refreshStorage()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
@@ -77,8 +101,11 @@ class MainActivity : AppCompatActivity() {
         }
         binding.switchDelete.setOnCheckedChangeListener { _, on -> settings.deleteOriginals = on }
         binding.switchOnlySmaller.setOnCheckedChangeListener { _, on -> settings.onlyIfSmaller = on }
+        binding.switchSkipSmall.setOnCheckedChangeListener { _, on -> settings.skipSmall = on }
         binding.switchSkipExisting.setOnCheckedChangeListener { _, on -> settings.skipAlreadyConverted = on }
-        binding.switchSkipLossy.setOnCheckedChangeListener { _, on -> settings.skipLossyMetadata = on }
+        binding.motionPolicyGroup.setOnCheckedChangeListener { _, _ ->
+            settings.motionPolicy = selectedMotionPolicy()
+        }
 
         observeEngine()
         requestPermissions()
@@ -110,10 +137,28 @@ class MainActivity : AppCompatActivity() {
         showQuality(settings.quality)
         binding.switchDelete.isChecked = settings.deleteOriginals
         binding.switchOnlySmaller.isChecked = settings.onlyIfSmaller
+        binding.switchSkipSmall.isChecked = settings.skipSmall
         binding.switchSkipExisting.isChecked = settings.skipAlreadyConverted
-        binding.switchSkipLossy.isChecked = settings.skipLossyMetadata
+        checkMotionPolicy(settings.motionPolicy)
         range = settings.range
         showRange()
+    }
+
+    private fun selectedMotionPolicy(): MotionPhotoPolicy =
+        when (binding.motionPolicyGroup.checkedRadioButtonId) {
+            R.id.motionSkip -> MotionPhotoPolicy.SKIP
+            R.id.motionDropVideo -> MotionPhotoPolicy.DROP_VIDEO
+            else -> MotionPhotoPolicy.KEEP_VIDEO
+        }
+
+    private fun checkMotionPolicy(policy: MotionPhotoPolicy) {
+        binding.motionPolicyGroup.check(
+            when (policy) {
+                MotionPhotoPolicy.SKIP -> R.id.motionSkip
+                MotionPhotoPolicy.DROP_VIDEO -> R.id.motionDropVideo
+                MotionPhotoPolicy.KEEP_VIDEO -> R.id.motionKeepVideo
+            }
+        )
     }
 
     // region permissions
@@ -247,6 +292,36 @@ class MainActivity : AppCompatActivity() {
         appendLine(
             getString(headline, progress.done + 1, progress.total, progress.currentName)
         )
+        appendLine(
+            getString(R.string.run_saved, progress.converted, formatSize(progress.savedBytes))
+        )
+        // The same still/motion split the final report shows, kept live so a long run's saving is
+        // legible while it happens rather than only at the end.
+        appendLine(
+            getString(
+                R.string.run_saved_stills,
+                progress.converted - progress.convertedMotion,
+                formatSize(progress.savedBytes - progress.savedMotionBytes),
+            )
+        )
+        if (progress.convertedMotion > 0) {
+            appendLine(
+                getString(
+                    R.string.run_saved_motion,
+                    progress.convertedMotion,
+                    formatSize(progress.savedMotionBytes),
+                )
+            )
+        }
+        if (progress.skippedTooSmall > 0) {
+            appendLine(
+                getString(
+                    R.string.run_skipped_small,
+                    progress.skippedTooSmall,
+                    formatSize(progress.skippedTooSmallBytes),
+                )
+            )
+        }
         if (progress.promptAt > 0) {
             appendLine(
                 getString(R.string.pending_delete, progress.pendingDeletions, progress.promptAt)
@@ -256,7 +331,9 @@ class MainActivity : AppCompatActivity() {
             getString(
                 R.string.run_counters,
                 progress.skippedMotion,
-                progress.skippedOther,
+                progress.skippedExisting,
+                progress.skippedNotSmaller,
+                progress.skippedNameClash,
                 progress.failures,
             )
         )
@@ -272,8 +349,9 @@ class MainActivity : AppCompatActivity() {
         quality = binding.qualitySlider.value.toInt(),
         deleteOriginals = binding.switchDelete.isChecked,
         onlyIfSmaller = binding.switchOnlySmaller.isChecked,
+        skipSmall = binding.switchSkipSmall.isChecked,
         skipAlreadyConverted = binding.switchSkipExisting.isChecked,
-        skipLossyMetadata = binding.switchSkipLossy.isChecked,
+        motionPolicy = selectedMotionPolicy(),
     )
 
     /**
@@ -317,7 +395,7 @@ class MainActivity : AppCompatActivity() {
         }
         val count = (engine.state.value as? UiState.Ready)?.photos?.size
         val deleting = binding.switchDelete.isChecked
-        val convertingMotionPhotos = !binding.switchSkipLossy.isChecked
+        val motionPolicy = selectedMotionPolicy()
 
         val message = buildString {
             if (count != null) appendLine("$count JPG photos are in this range.").appendLine()
@@ -325,17 +403,26 @@ class MainActivity : AppCompatActivity() {
             appendLine()
             appendLine("Dates and EXIF (including GPS) are copied across. XMP and colour profiles cannot be, so edits and wide-gamut colour are lost.")
             appendLine()
-            // The one loss that is not a matter of degree: the embedded video simply ceases to
-            // exist. Worth saying before the deletion, not only in the report afterwards.
-            if (convertingMotionPhotos) {
-                appendLine(
-                    if (deleting) {
-                        "\"Skip motion photos\" is off, so their embedded videos will be destroyed."
-                    } else {
-                        "\"Skip motion photos\" is off, so their embedded videos will not be carried over."
-                    }
-                )
-                appendLine()
+            // Motion photos are the case worth spelling out before deletion: with "keep the video"
+            // nothing is lost, but "convert to a still" destroys the video for good.
+            when (motionPolicy) {
+                MotionPhotoPolicy.KEEP_VIDEO -> {
+                    appendLine("Motion photos keep their video: each becomes a HEIC motion photo, kept only if it comes out smaller.")
+                    appendLine()
+                }
+
+                MotionPhotoPolicy.DROP_VIDEO -> {
+                    appendLine(
+                        if (deleting) {
+                            "Motion photos will be flattened to stills — their embedded videos will be destroyed."
+                        } else {
+                            "Motion photos will be flattened to stills — their embedded videos will not be carried over."
+                        }
+                    )
+                    appendLine()
+                }
+
+                MotionPhotoPolicy.SKIP -> Unit
             }
             append(
                 if (deleting) "The originals will be deleted once each HEIC is written."
@@ -406,6 +493,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun render(state: UiState) {
         updateButtons(state)
+        // The failed-photo list belongs to a finished run only; drop it for every other state so a
+        // new run does not start under the previous run's failures.
+        if (state !is UiState.Finished) clearFailures()
 
         when (state) {
             UiState.Idle -> {
@@ -457,6 +547,7 @@ class MainActivity : AppCompatActivity() {
             is UiState.Finished -> {
                 binding.statusText.text = ""
                 binding.resultText.text = describe(state.report)
+                showFailures(state.report)
                 // A finished run changes the picture, sometimes a lot.
                 refreshStorage()
             }
@@ -481,6 +572,14 @@ class MainActivity : AppCompatActivity() {
             appendLine("No photos were converted.")
         } else {
             appendLine("Photos converted:  ${report.converted}")
+            appendLine(
+                "  Stills:  ${report.convertedStills} · saved ${formatSize(report.stillSavedBytes)}"
+            )
+            if (report.convertedMotion > 0) {
+                appendLine(
+                    "  Motion:  ${report.convertedMotion} · saved ${formatSize(report.motionSavedBytes)}"
+                )
+            }
             appendLine("Original JPGs:     ${formatSize(report.originalBytes)}")
             appendLine("HEIC output:       ${formatSize(report.heicBytes)}")
             appendLine("Space saved:       ${formatSize(report.savedBytes)} (${report.savedPercent}%)")
@@ -494,11 +593,21 @@ class MainActivity : AppCompatActivity() {
             appendLine("Skipped, already converted: ${report.skippedExisting}")
         }
         if (report.skippedNotSmaller > 0) appendLine("Skipped, HEIC was not smaller: ${report.skippedNotSmaller}")
+        if (report.skippedTooSmall > 0) {
+            appendLine(
+                "Skipped, under 1 MB: ${report.skippedTooSmall} " +
+                    "(${formatSize(report.skippedTooSmallBytes)} left as JPG)"
+            )
+        }
         if (report.skippedMotionPhoto > 0) appendLine("Skipped, motion photos: ${report.skippedMotionPhoto}")
 
+        // The win worth stating plainly: a motion photo carried across whole, video and all.
+        if (report.motionPhotosPreserved > 0) {
+            appendLine("Motion photos kept whole (video re-attached): ${report.motionPhotosPreserved}")
+        }
         // Losses the user cannot see in the file browser, called out because originals get deleted.
         if (report.convertedMotionPhotos > 0) {
-            appendLine("Motion photos converted (video lost): ${report.convertedMotionPhotos}")
+            appendLine("Motion photos flattened to stills (video lost): ${report.convertedMotionPhotos}")
         }
         if (report.droppedXmp > 0) appendLine("XMP metadata lost: ${report.droppedXmp}")
         if (report.flattenedColour > 0) appendLine("Colour profile lost (flattened to sRGB): ${report.flattenedColour}")
@@ -513,11 +622,18 @@ class MainActivity : AppCompatActivity() {
             appendLine("Mirrored orientation, check these: ${report.mirroredOrientation}")
         }
 
+        // Per-file failures get their own interactive list below the summary (view / delete per
+        // photo). Only whole-run failures — which have no single file behind them — and the
+        // headline count belong in the text.
+        val fileFailures = report.failures.count { it.hasFile }
+        report.failures.filterNot { it.hasFile }.forEach { appendLine(it.reason) }
         if (report.failureCount > 0) {
             appendLine()
-            appendLine("Failed (${report.failureCount}):")
-            report.failures.take(20).forEach { appendLine("  $it") }
-            if (report.failureCount > 20) appendLine("  …and ${report.failureCount - 20} more")
+            if (fileFailures > 0) {
+                appendLine("Failed to convert: ${report.failureCount} (listed below)")
+            } else {
+                appendLine("Failed: ${report.failureCount}")
+            }
         }
 
         // Everything already had a HEIC beside it, which is what an interrupted or declined
@@ -580,6 +696,62 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     appendLine("Deletion was declined; nothing was removed.")
                 }
+        }
+    }
+
+    private fun clearFailures() {
+        binding.failuresList.removeAllViews()
+        binding.failuresHeading.isVisible(false)
+    }
+
+    /**
+     * Fills the interactive failed-photo list: one row per photo that could not be converted, each
+     * with its name, size and reason, and a view/delete action. Whole-run failures (no file behind
+     * them) are left out — they are already stated in the summary text above.
+     */
+    private fun showFailures(report: RunReport) {
+        val failures = report.failures.filter { it.hasFile }
+        binding.failuresList.removeAllViews()
+        binding.failuresHeading.isVisible(failures.isNotEmpty())
+        if (failures.isEmpty()) return
+
+        binding.failuresHeading.text = getString(R.string.failures_subheading, failures.size)
+        for (failure in failures) {
+            val row = ItemFailedPhotoBinding.inflate(layoutInflater, binding.failuresList, false)
+            row.failedName.text = failure.name
+            row.failedDetail.text =
+                getString(R.string.failed_detail, formatSize(failure.sizeBytes), failure.reason)
+            row.failedViewButton.setOnClickListener { viewPhoto(failure) }
+            row.failedDeleteButton.setOnClickListener { deleteFailedPhoto(failure, row.root) }
+            binding.failuresList.addView(row.root)
+        }
+    }
+
+    private fun viewPhoto(failure: FailedPhoto) {
+        val intent = Intent(Intent.ACTION_VIEW)
+            .setDataAndType(failure.uri, "image/jpeg")
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        try {
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.w(TAG, "No viewer for ${failure.uri}", e)
+            Toast.makeText(this, R.string.view_failed, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /**
+     * Deletes a single failed original through the system's delete confirmation, which is its own
+     * safeguard — the file was never converted, so this is the only copy. The row is removed once
+     * the delete is confirmed, in [failureDeleteLauncher].
+     */
+    private fun deleteFailedPhoto(failure: FailedPhoto, row: View) {
+        try {
+            val sender = engine.createDeleteIntentSender(listOf(failure.uri))
+            pendingFailureDelete = failure to row
+            failureDeleteLauncher.launch(IntentSenderRequest.Builder(sender).build())
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not start delete for ${failure.uri}", e)
+            Toast.makeText(this, R.string.view_failed, Toast.LENGTH_SHORT).show()
         }
     }
 

@@ -286,8 +286,9 @@ class ConversionService : Service() {
         private const val EXTRA_QUALITY = "quality"
         private const val EXTRA_DELETE = "delete"
         private const val EXTRA_ONLY_SMALLER = "only_smaller"
+        private const val EXTRA_SKIP_SMALL = "skip_small"
         private const val EXTRA_SKIP_EXISTING = "skip_existing"
-        private const val EXTRA_SKIP_LOSSY = "skip_lossy"
+        private const val EXTRA_MOTION_POLICY = "motion_policy"
 
         /**
          * Clears the "tap to delete the originals" notification.
@@ -311,19 +312,23 @@ class ConversionService : Service() {
                 .putExtra(EXTRA_QUALITY, options.quality)
                 .putExtra(EXTRA_DELETE, options.deleteOriginals)
                 .putExtra(EXTRA_ONLY_SMALLER, options.onlyIfSmaller)
+                .putExtra(EXTRA_SKIP_SMALL, options.skipSmall)
                 .putExtra(EXTRA_SKIP_EXISTING, options.skipAlreadyConverted)
-                .putExtra(EXTRA_SKIP_LOSSY, options.skipLossyMetadata)
+                .putExtra(EXTRA_MOTION_POLICY, options.motionPolicy.name)
             ContextCompat.startForegroundService(context, intent)
         }
 
         private fun Intent.toOptions() = RunOptions(
             startMs = getLongExtra(EXTRA_START, 0L),
             endMs = getLongExtra(EXTRA_END, Long.MAX_VALUE),
-            quality = getIntExtra(EXTRA_QUALITY, 90),
+            quality = getIntExtra(EXTRA_QUALITY, Settings.DEFAULT_QUALITY),
             deleteOriginals = getBooleanExtra(EXTRA_DELETE, false),
             onlyIfSmaller = getBooleanExtra(EXTRA_ONLY_SMALLER, true),
+            skipSmall = getBooleanExtra(EXTRA_SKIP_SMALL, true),
             skipAlreadyConverted = getBooleanExtra(EXTRA_SKIP_EXISTING, true),
-            skipLossyMetadata = getBooleanExtra(EXTRA_SKIP_LOSSY, true),
+            motionPolicy = runCatching {
+                MotionPhotoPolicy.valueOf(getStringExtra(EXTRA_MOTION_POLICY) ?: "")
+            }.getOrDefault(MotionPhotoPolicy.KEEP_VIDEO),
         )
     }
 }

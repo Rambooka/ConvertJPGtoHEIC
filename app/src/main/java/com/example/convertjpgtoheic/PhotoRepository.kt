@@ -7,8 +7,10 @@ import android.database.Cursor
 import android.net.Uri
 import android.provider.MediaStore
 import android.system.Os
+import android.system.OsConstants
 import android.util.Log
 import java.io.InputStream
+import java.io.OutputStream
 
 /**
  * Output naming, kept free of Android types so the awkward cases can be tested directly.
@@ -277,6 +279,49 @@ class PhotoRepository(private val context: Context) {
             if (read == take) buffer else buffer.copyOf(read)
         }
     }.getOrNull()
+
+    /**
+     * Parses the Samsung SEF trailer, telling us whether the photo is a motion photo and where its
+     * trailer begins. Reads only the tail and the file size, so it costs a few kilobytes.
+     */
+    fun readSefInfo(uri: Uri): SefInfo? = runCatching {
+        resolver.openFileDescriptor(uri, "r")?.use { descriptor ->
+            val size = descriptor.statSize
+            if (size <= 0) return@use null
+            val take = minOf(SefTrailer.TAIL_BYTES.toLong(), size).toInt()
+            val buffer = ByteArray(take)
+            var read = 0
+            while (read < take) {
+                val r = Os.pread(descriptor.fileDescriptor, buffer, read, take - read, size - take + read)
+                if (r <= 0) break
+                read += r
+            }
+            if (read < take) null else SefTrailer.parse(buffer, size)
+        }
+    }.getOrNull()
+
+    /**
+     * Streams the source file from [start] to its end into [out], returning the number of bytes
+     * copied. Used to lift a motion photo's SEF trailer (its video) onto the finished HEIC.
+     */
+    fun copyRange(uri: Uri, start: Long, out: OutputStream): Long = runCatching {
+        resolver.openFileDescriptor(uri, "r")?.use { descriptor ->
+            val fd = descriptor.fileDescriptor
+            Os.lseek(fd, start, OsConstants.SEEK_SET)
+            val buffer = ByteArray(256 * 1024)
+            var total = 0L
+            while (true) {
+                val r = Os.read(fd, buffer, 0, buffer.size)
+                if (r <= 0) break
+                out.write(buffer, 0, r)
+                total += r
+            }
+            total
+        } ?: 0L
+    }.getOrElse {
+        Log.w(TAG, "Could not copy the trailer of $uri", it)
+        0L
+    }
 
     /**
      * Opens the original bytes. With ACCESS_MEDIA_LOCATION granted this asks for the *unredacted*

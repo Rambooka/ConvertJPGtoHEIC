@@ -95,7 +95,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:stepSize="5"
-            android:value="90"
+            android:value="80"
             android:valueFrom="50"
             android:valueTo="100" />
 
@@ -108,6 +108,14 @@
             android:text="@string/opt_only_smaller" />
 
         <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/switchSkipSmall"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:checked="true"
+            android:text="@string/opt_skip_small" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
             android:id="@+id/switchSkipExisting"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -115,19 +123,43 @@
             android:checked="true"
             android:text="@string/opt_skip_existing" />
 
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/switchSkipLossy"
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="@string/opt_motion_heading"
+            android:textAppearance="?attr/textAppearanceTitleSmall" />
+
+        <RadioGroup
+            android:id="@+id/motionPolicyGroup"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:checked="true"
-            android:text="@string/opt_skip_lossy" />
+            android:layout_marginTop="4dp">
+
+            <RadioButton
+                android:id="@+id/motionKeepVideo"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/opt_motion_keep_video" />
+
+            <RadioButton
+                android:id="@+id/motionSkip"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/opt_motion_skip" />
+
+            <RadioButton
+                android:id="@+id/motionDropVideo"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/opt_motion_drop_video" />
+        </RadioGroup>
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginStart="4dp"
-            android:text="@string/opt_skip_lossy_hint"
+            android:text="@string/opt_motion_hint"
             android:textAppearance="?attr/textAppearanceBodySmall" />
 
         <com.google.android.material.materialswitch.MaterialSwitch
@@ -208,11 +240,27 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:layout_marginBottom="24dp"
             android:fontFamily="monospace"
             android:textAppearance="?attr/textAppearanceBodySmall"
             android:textIsSelectable="true"
             tools:text="Dry run complete." />
+
+        <TextView
+            android:id="@+id/failuresHeading"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="@string/failures_heading"
+            android:textAppearance="?attr/textAppearanceTitleSmall"
+            android:visibility="gone"
+            tools:visibility="visible" />
+
+        <LinearLayout
+            android:id="@+id/failuresList"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="24dp"
+            android:orientation="vertical" />
 
     </LinearLayout>
 

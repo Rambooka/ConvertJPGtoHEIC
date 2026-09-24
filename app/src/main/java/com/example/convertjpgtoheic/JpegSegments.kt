@@ -47,12 +47,6 @@ object JpegSegments {
      */
     private val MOTION_PHOTO_XMP_HINTS = listOf("MotionPhoto", "MicroVideo", "video/mp4")
 
-    /**
-     * Markers that only appear in the bytes *after* the image data. Samsung records nothing useful
-     * in the XMP, so its motion photos can only be spotted from the trailer.
-     */
-    private val MOTION_PHOTO_TRAILER_HINTS = listOf("MotionPhoto_Data", "SEFT", "MicroVideo")
-
     fun read(input: InputStream): JpegMetadata {
         var exif: ByteArray? = null
         var hasXmp = false
@@ -104,15 +98,6 @@ object JpegSegments {
 
         return JpegMetadata(exif, hasXmp, hasIcc, motion)
     }
-
-    /**
-     * True if the tail of the file looks like a motion-photo trailer.
-     *
-     * Pass the last few tens of kilobytes; the markers sit near the very end, so there is no need
-     * to read a multi-megabyte file to find them.
-     */
-    fun hasMotionPhotoTrailer(tail: ByteArray): Boolean =
-        tail.containsAnyText(MOTION_PHOTO_TRAILER_HINTS)
 
     // region byte helpers
 

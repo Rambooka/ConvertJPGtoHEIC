@@ -6,10 +6,13 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.storage.StorageManager
 import android.system.Os
+import android.system.OsConstants
 import android.util.Log
 import androidx.heifwriter.HeifWriter
+import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileDescriptor
+import java.io.FileOutputStream
 
 /** Where the encoder should put the HEIC it produces. */
 sealed interface HeicTarget {
@@ -121,13 +124,14 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
         metadata: JpegMetadata,
         quality: Int,
         rotationDegrees: Int,
+        trailerStart: Long? = null,
     ): EncodeResult {
         if (!ensureStagingDir()) {
             return EncodeResult.Failure("no working folder to write to (storage may be full)")
         }
         val file = File(cacheDir, "${photo.baseName}-${System.nanoTime()}.heic")
         file.delete()
-        val result = encode(photo, metadata, quality, rotationDegrees, HeicTarget.Staging(file))
+        val result = encode(photo, metadata, quality, rotationDegrees, HeicTarget.Staging(file), trailerStart)
         if (result is EncodeResult.Failure) file.delete()
         return result
     }
@@ -139,16 +143,25 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
         quality: Int,
         rotationDegrees: Int,
         descriptor: FileDescriptor,
+        trailerStart: Long? = null,
     ): EncodeResult = encode(
-        photo, metadata, quality, rotationDegrees, HeicTarget.Descriptor(descriptor),
+        photo, metadata, quality, rotationDegrees, HeicTarget.Descriptor(descriptor), trailerStart,
     )
 
+    /**
+     * @param trailerStart when non-null, the byte offset in the *original* file where its Samsung
+     *   SEF trailer begins. That trailer — the embedded motion-photo video and its metadata — is
+     *   copied verbatim onto the end of the finished HEIC, which keeps the result a playable motion
+     *   photo. Its offsets are self-relative, so a HEIC of a different size than the source JPG does
+     *   not disturb them. See [SefTrailer].
+     */
     private fun encode(
         photo: SourcePhoto,
         metadata: JpegMetadata,
         quality: Int,
         rotationDegrees: Int,
         target: HeicTarget,
+        trailerStart: Long?,
     ): EncodeResult {
         val bitmap = try {
             decode(photo)
@@ -165,12 +178,18 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
 
         return try {
             writeHeif(target, bitmap, quality, metadata.exif, rotationDegrees)
-            val bytes = sizeOf(target)
+            var bytes = sizeOf(target)
             if (bytes <= 0L) {
-                EncodeResult.Failure("encoder produced an empty file")
-            } else {
-                EncodeResult.Success(bytes, width, height, (target as? HeicTarget.Staging)?.file)
+                return EncodeResult.Failure("encoder produced an empty file")
             }
+            if (trailerStart != null) {
+                val appended = appendTrailer(target, bytes, photo.uri, trailerStart)
+                if (appended <= 0L) {
+                    return EncodeResult.Failure("could not attach the motion photo's video")
+                }
+                bytes = sizeOf(target)
+            }
+            EncodeResult.Success(bytes, width, height, (target as? HeicTarget.Staging)?.file)
         } catch (e: Exception) {
             Log.e(TAG, "HEIC encode failed for ${photo.displayName}", e)
             // Include the message, not just the class. FileNotFoundException alone cannot
@@ -189,6 +208,35 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
         is HeicTarget.Staging -> target.file.length()
         // The descriptor has no path to stat, so ask the kernel about the open file itself.
         is HeicTarget.Descriptor -> runCatching { Os.fstat(target.descriptor).st_size }.getOrDefault(-1L)
+    }
+
+    /**
+     * Copies the source file's SEF trailer — the motion-photo video — onto the end of the HEIC that
+     * has just been written, and returns how many bytes were appended.
+     *
+     * The HEIC is a complete ISO-BMFF file; a compliant decoder stops at its last box and ignores
+     * whatever follows, which is exactly how Samsung's own motion photos carry their video. The
+     * trailer's internal offsets are relative to its own directory, so appending it after a HEIC of
+     * a different size than the source JPG leaves them all valid.
+     */
+    private fun appendTrailer(
+        target: HeicTarget,
+        heicSize: Long,
+        sourceUri: android.net.Uri,
+        trailerStart: Long,
+    ): Long = when (target) {
+        is HeicTarget.Staging ->
+            BufferedOutputStream(FileOutputStream(target.file, /* append = */ true)).use { out ->
+                repository.copyRange(sourceUri, trailerStart, out).also { out.flush() }
+            }
+
+        is HeicTarget.Descriptor -> {
+            // Position at the end of the HEIC the muxer just wrote, then stream the trailer in.
+            // The FileOutputStream must not be closed — the descriptor belongs to the caller.
+            Os.lseek(target.descriptor, heicSize, OsConstants.SEEK_SET)
+            val out = BufferedOutputStream(FileOutputStream(target.descriptor))
+            repository.copyRange(sourceUri, trailerStart, out).also { out.flush() }
+        }
     }
 
     /**

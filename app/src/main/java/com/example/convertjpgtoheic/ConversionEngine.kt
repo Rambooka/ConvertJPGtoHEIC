@@ -30,6 +30,25 @@ enum class RunMode {
     CLEAN_UP,
 }
 
+/** What to do when a photo turns out to be a motion photo. */
+enum class MotionPhotoPolicy {
+    /** Leave it untouched. Nothing is re-encoded and the original is not deleted. */
+    SKIP,
+
+    /**
+     * Re-encode the still to HEIC and re-attach the original video, so the result stays a playable
+     * motion photo. Only Samsung SEF motion photos can be carried across this way; a motion photo
+     * whose video cannot be re-attached is skipped rather than silently flattened to a still.
+     */
+    KEEP_VIDEO,
+
+    /** Re-encode the still to HEIC and discard the video — a plain still, smaller than either. */
+    DROP_VIDEO,
+}
+
+/** How a single photo's motion video was handled, so the report can count it honestly. */
+enum class MotionOutcome { NONE, PRESERVED, DROPPED }
+
 data class RunOptions(
     val startMs: Long,
     val endMs: Long,
@@ -37,9 +56,11 @@ data class RunOptions(
     val deleteOriginals: Boolean,
     /** Discard a HEIC that came out no smaller than its JPG, rather than trade quality for nothing. */
     val onlyIfSmaller: Boolean,
+    /** Pass over JPGs under [MIN_CONVERT_SIZE_BYTES] — too little to gain to be worth re-encoding. */
+    val skipSmall: Boolean,
     val skipAlreadyConverted: Boolean,
-    /** Leave motion photos alone — converting one silently discards its embedded video. */
-    val skipLossyMetadata: Boolean,
+    /** What to do with motion photos — skip them, keep the video, or drop it. */
+    val motionPolicy: MotionPhotoPolicy,
 )
 
 data class RunProgress(
@@ -50,11 +71,40 @@ data class RunProgress(
     val pendingDeletions: Int = 0,
     /** How many they are waiting for, so the UI need not know the engine's batch size. */
     val promptAt: Int = 0,
-    /** Running tallies, so a long run shows what it is quietly passing over. */
+    /** Running tallies, so a long run shows what it is doing and quietly passing over. */
+    val converted: Int = 0,
+    /** Bytes saved so far — original size minus HEIC output over everything converted. */
+    val savedBytes: Long = 0,
+    /** Of [converted], how many were motion photos, and the bytes those saved — so the live
+     *  status can break the saving down the same way the final report does. */
+    val convertedMotion: Int = 0,
+    val savedMotionBytes: Long = 0,
     val skippedMotion: Int = 0,
-    val skippedOther: Int = 0,
+    /** JPGs passed over for being under the size floor, and the bytes they still occupy. */
+    val skippedTooSmall: Int = 0,
+    val skippedTooSmallBytes: Long = 0,
+    /** The three "other" skips, broken out so the status says *why* something was passed over. */
+    val skippedExisting: Int = 0,
+    val skippedNotSmaller: Int = 0,
+    val skippedNameClash: Int = 0,
     val failures: Int = 0,
 )
+
+/**
+ * A photo that could not be converted, carrying what the report needs to show it and act on it.
+ *
+ * [uri] is [Uri.EMPTY] for a whole-run failure that has no single file behind it (no encoder,
+ * storage full), in which case only [reason] is meaningful.
+ */
+data class FailedPhoto(
+    val uri: Uri,
+    val name: String,
+    val sizeBytes: Long,
+    val reason: String,
+) {
+    /** A real file stands behind this failure, so it can be viewed and deleted. */
+    val hasFile: Boolean get() = uri != Uri.EMPTY
+}
 
 data class RunReport(
     val mode: RunMode,
@@ -75,6 +125,8 @@ data class RunReport(
     val mirroredOrientation: Int = 0,
     /** Converted despite being a motion photo, so the embedded video was discarded. */
     val convertedMotionPhotos: Int = 0,
+    /** Converted as a HEIC motion photo, with the original video re-attached and nothing lost. */
+    val motionPhotosPreserved: Int = 0,
     /** Written to a different folder, because the source folder is not one the images
      *  collection accepts. */
     val relocated: Int = 0,
@@ -84,27 +136,66 @@ data class RunReport(
     val renamedOutput: Int = 0,
     val originalBytes: Long = 0,
     val heicBytes: Long = 0,
+    /**
+     * The motion-photo subset of [originalBytes]/[heicBytes]. Stills are derived as the remainder,
+     * so the two always add back up to the totals with no chance of the buckets drifting apart.
+     */
+    val motionOriginalBytes: Long = 0,
+    val motionHeicBytes: Long = 0,
+    /** JPGs skipped for being under the size floor, and the bytes they still take up on disk. */
+    val skippedTooSmall: Int = 0,
+    val skippedTooSmallBytes: Long = 0,
     /** Sample of failure messages, capped — see [failureCount] for the real total. */
-    val failures: List<String> = emptyList(),
+    val failures: List<FailedPhoto> = emptyList(),
     val failureCount: Int = 0,
     val deletedOriginals: Int = 0,
     val deletionOutcome: DeletionOutcome = DeletionOutcome.NOT_REQUESTED,
 ) {
     /**
-     * Records a failure without letting the list grow without bound.
+     * Records a whole-run failure with no single file behind it — no encoder, storage full.
+     *
+     * Kept in the same list as the per-photo ones (with an empty [FailedPhoto.uri]) so the report
+     * has one place to look; the UI shows these as a plain reason, with no view/delete buttons.
+     */
+    fun withFailure(reason: String): RunReport = copy(
+        failures = if (failures.size < MAX_RETAINED_FAILURES) {
+            failures + FailedPhoto(Uri.EMPTY, "", 0, reason)
+        } else {
+            failures
+        },
+        failureCount = failureCount + 1,
+    )
+
+    /**
+     * Records a single photo that could not be converted, keeping the handle, name and size the
+     * report needs to show it and act on it.
      *
      * Appending to an immutable list once per photo is quadratic, and a run where everything fails
-     * — a device with no working encoder, say — would build thousands of strings the UI never
-     * shows. Only a sample is kept; the count stays exact.
+     * would build thousands of entries the UI never shows. Only a sample is kept; [failureCount]
+     * stays exact.
      */
-    fun withFailure(message: String): RunReport = copy(
-        failures = if (failures.size < MAX_RETAINED_FAILURES) failures + message else failures,
+    fun withFailure(photo: SourcePhoto, reason: String): RunReport = copy(
+        failures = if (failures.size < MAX_RETAINED_FAILURES) {
+            failures + FailedPhoto(photo.uri, photo.displayName, photo.sizeBytes, reason)
+        } else {
+            failures
+        },
         failureCount = failureCount + 1,
     )
 
     val savedBytes: Long get() = originalBytes - heicBytes
     val savedPercent: Int
         get() = if (originalBytes <= 0) 0 else ((savedBytes * 100) / originalBytes).toInt()
+
+    /** How many of the converted photos were motion photos (kept whole or flattened). */
+    val convertedMotion: Int get() = convertedMotionPhotos + motionPhotosPreserved
+
+    /** The still-photo half of the breakdown — everything that was not a motion photo. */
+    val convertedStills: Int get() = converted - convertedMotion
+    val stillOriginalBytes: Long get() = originalBytes - motionOriginalBytes
+    val stillHeicBytes: Long get() = heicBytes - motionHeicBytes
+    val stillSavedBytes: Long get() = stillOriginalBytes - stillHeicBytes
+    val motionSavedBytes: Long get() = motionOriginalBytes - motionHeicBytes
 }
 
 private const val MAX_RETAINED_FAILURES = 50
@@ -350,9 +441,16 @@ class ConversionEngine private constructor(context: Context) {
                         currentName = photo.displayName,
                         pendingDeletions = toDelete.size,
                         promptAt = if (deleteAsWeGo) DELETE_PROMPT_EVERY else 0,
+                        converted = tally.converted,
+                        savedBytes = tally.savedBytes,
+                        convertedMotion = tally.convertedMotion,
+                        savedMotionBytes = tally.motionSavedBytes,
                         skippedMotion = tally.skippedMotionPhoto,
-                        skippedOther = tally.skippedExisting + tally.skippedNotSmaller +
-                            tally.renamedOutput,
+                        skippedTooSmall = tally.skippedTooSmall,
+                        skippedTooSmallBytes = tally.skippedTooSmallBytes,
+                        skippedExisting = tally.skippedExisting,
+                        skippedNotSmaller = tally.skippedNotSmaller,
+                        skippedNameClash = tally.renamedOutput,
                         failures = tally.failureCount,
                     ),
                 )
@@ -366,13 +464,41 @@ class ConversionEngine private constructor(context: Context) {
                     continue
                 }
 
+                // A tiny JPG barely gains from re-encoding and still costs a full read/encode/write
+                // cycle, so pass it over. A zero SIZE means MediaStore does not know how big it is,
+                // and guessing "small" there would wrongly skip it — so only a known, small size
+                // counts. The bytes are tallied so the report can say how much was left untouched.
+                if (options.skipSmall && photo.sizeBytes in 1 until MIN_CONVERT_SIZE_BYTES) {
+                    tally = tally.copy(
+                        skippedTooSmall = tally.skippedTooSmall + 1,
+                        skippedTooSmallBytes = tally.skippedTooSmallBytes + photo.sizeBytes,
+                    )
+                    continue
+                }
+
                 val metadata = inspect(photo)
-                // Checked either way: if we are not skipping it, the lost video still belongs in
-                // the report, because the original is about to be deleted.
-                val motionPhoto = isMotionPhoto(photo, metadata)
-                if (options.skipLossyMetadata && motionPhoto) {
+                // Decide how this photo's motion video is handled before touching it, so both the
+                // encode (which may need to re-attach the video) and the report agree.
+                val motion = motionInfo(photo, metadata)
+                val skipMotion = motion.isMotionPhoto && (
+                    options.motionPolicy == MotionPhotoPolicy.SKIP ||
+                        // "Keep the video" but there is no video we can carry across (e.g. a
+                        // non-Samsung motion photo): skip rather than silently flatten it.
+                        (options.motionPolicy == MotionPhotoPolicy.KEEP_VIDEO &&
+                            motion.videoTrailerStart == null)
+                    )
+                if (skipMotion) {
                     tally = tally.copy(skippedMotionPhoto = tally.skippedMotionPhoto + 1)
                     continue
+                }
+
+                // Non-null when the run will re-attach the original video onto the new HEIC.
+                val trailerStart = motion.videoTrailerStart
+                    ?.takeIf { options.motionPolicy == MotionPhotoPolicy.KEEP_VIDEO }
+                val motionOutcome = when {
+                    !motion.isMotionPhoto -> MotionOutcome.NONE
+                    trailerStart != null -> MotionOutcome.PRESERVED
+                    else -> MotionOutcome.DROPPED
                 }
 
                 // A JPG with no EXIF of its own still needs a capture date in the file, or a later
@@ -399,10 +525,10 @@ class ConversionEngine private constructor(context: Context) {
                 )
 
                 tally = if (mode == RunMode.DRY_RUN) {
-                    measure(options, photo, metadata, motionPhoto, rotation == null,
+                    measure(options, photo, metadata, motionOutcome, trailerStart, rotation == null,
                         counterpartExists, forEncoding, rotation ?: 0, tally)
                 } else {
-                    convertOne(options, photo, metadata, motionPhoto, rotation == null,
+                    convertOne(options, photo, metadata, motionOutcome, trailerStart, rotation == null,
                         forEncoding, rotation ?: 0, tally, toDelete)
                 }
 
@@ -484,15 +610,33 @@ class ConversionEngine private constructor(context: Context) {
         return header ?: JpegMetadata(null, hasXmp = false, hasIccProfile = false, motionPhotoInHeader = false)
     }
 
+    /** What a photo's motion video is, and whether we can carry it across. */
+    private data class MotionInfo(
+        val isMotionPhoto: Boolean,
+        /**
+         * The byte offset where the Samsung SEF trailer begins, when the video can be re-attached
+         * by copying `[videoTrailerStart, EOF)` onto the new HEIC. Null for a motion photo whose
+         * video we cannot preserve (a Google/Pixel motion photo, whose video lives in an XMP
+         * container HeifWriter has no channel for).
+         */
+        val videoTrailerStart: Long?,
+    )
+
     /**
-     * Google records the embedded clip in the XMP, so the header settles it. Samsung records
-     * nothing up front, so its motion photos can only be found from the trailer — worth the extra
-     * short read, because converting one destroys the video for good.
+     * Works out whether a photo is a motion photo and, if so, whether its video can be re-attached.
+     *
+     * Google records the clip in the XMP, so the header alone flags it — but that video sits in an
+     * XMP container we cannot rebuild, so it is a motion photo we can only skip or flatten. Samsung
+     * appends a self-contained SEF trailer whose video is a standalone MP4; that one we can carry
+     * across verbatim. See [SefTrailer].
      */
-    private fun isMotionPhoto(photo: SourcePhoto, metadata: JpegMetadata): Boolean {
-        if (metadata.motionPhotoInHeader) return true
-        val tail = repository.readTail(photo.uri, TAIL_SCAN_BYTES) ?: return false
-        return JpegSegments.hasMotionPhotoTrailer(tail)
+    private fun motionInfo(photo: SourcePhoto, metadata: JpegMetadata): MotionInfo {
+        val sef = repository.readSefInfo(photo.uri)
+        if (sef != null && sef.hasVideo) {
+            return MotionInfo(isMotionPhoto = true, videoTrailerStart = sef.sefStart)
+        }
+        // No re-attachable Samsung video; it may still be a motion photo we cannot preserve.
+        return MotionInfo(isMotionPhoto = metadata.motionPhotoInHeader, videoTrailerStart = null)
     }
 
     /** Tally update shared by the dry run and the real one, for a photo that produced output. */
@@ -500,20 +644,28 @@ class ConversionEngine private constructor(context: Context) {
         tally: RunReport,
         photo: SourcePhoto,
         metadata: JpegMetadata,
-        motionPhoto: Boolean,
+        motionOutcome: MotionOutcome,
         mirrored: Boolean,
         outputBytes: Long,
     ): RunReport = tally.copy(
         converted = tally.converted + 1,
         originalBytes = tally.originalBytes + photo.sizeBytes,
         heicBytes = tally.heicBytes + outputBytes,
+        // The motion subset of the byte totals; stills fall out as the remainder in the report.
+        motionOriginalBytes = tally.motionOriginalBytes +
+            if (motionOutcome != MotionOutcome.NONE) photo.sizeBytes else 0,
+        motionHeicBytes = tally.motionHeicBytes +
+            if (motionOutcome != MotionOutcome.NONE) outputBytes else 0,
         exifPreserved = tally.exifPreserved + if (metadata.exif != null) 1 else 0,
         exifSynthesised = tally.exifSynthesised + if (metadata.exif == null) 1 else 0,
         droppedXmp = tally.droppedXmp + if (metadata.hasXmp) 1 else 0,
         flattenedColour = tally.flattenedColour + if (metadata.hasIccProfile) 1 else 0,
         relocated = tally.relocated +
             if (PhotoNaming.targetRelativePath(photo.relativePath) != photo.relativePath) 1 else 0,
-        convertedMotionPhotos = tally.convertedMotionPhotos + if (motionPhoto) 1 else 0,
+        convertedMotionPhotos = tally.convertedMotionPhotos +
+            if (motionOutcome == MotionOutcome.DROPPED) 1 else 0,
+        motionPhotosPreserved = tally.motionPhotosPreserved +
+            if (motionOutcome == MotionOutcome.PRESERVED) 1 else 0,
         mirroredOrientation = tally.mirroredOrientation + if (mirrored) 1 else 0,
     )
 
@@ -522,7 +674,8 @@ class ConversionEngine private constructor(context: Context) {
         options: RunOptions,
         photo: SourcePhoto,
         metadata: JpegMetadata,
-        motionPhoto: Boolean,
+        motionOutcome: MotionOutcome,
+        trailerStart: Long?,
         mirrored: Boolean,
         counterpartExists: Boolean,
         forEncoding: JpegMetadata,
@@ -530,13 +683,13 @@ class ConversionEngine private constructor(context: Context) {
         tally: RunReport,
     ): RunReport {
         encoder.preflight(photo)?.let {
-            return tally.withFailure("${photo.displayName} — ${it.reason}")
+            return tally.withFailure(photo, it.reason)
         }
 
         val success = when (
-            val result = encoder.encodeToStaging(photo, forEncoding, options.quality, rotation)
+            val result = encoder.encodeToStaging(photo, forEncoding, options.quality, rotation, trailerStart)
         ) {
-            is EncodeResult.Failure -> return tally.withFailure("${photo.displayName} — ${result.reason}")
+            is EncodeResult.Failure -> return tally.withFailure(photo, result.reason)
             is EncodeResult.Success -> result
         }
 
@@ -549,7 +702,7 @@ class ConversionEngine private constructor(context: Context) {
             if (counterpartExists) {
                 return tally.copy(renamedOutput = tally.renamedOutput + 1)
             }
-            return countConverted(tally, photo, metadata, motionPhoto, mirrored, success.bytes)
+            return countConverted(tally, photo, metadata, motionOutcome, mirrored, success.bytes)
         } finally {
             success.file?.delete()
         }
@@ -565,7 +718,8 @@ class ConversionEngine private constructor(context: Context) {
         options: RunOptions,
         photo: SourcePhoto,
         metadata: JpegMetadata,
-        motionPhoto: Boolean,
+        motionOutcome: MotionOutcome,
+        trailerStart: Long?,
         mirrored: Boolean,
         forEncoding: JpegMetadata,
         rotation: Int,
@@ -574,14 +728,14 @@ class ConversionEngine private constructor(context: Context) {
     ): RunReport {
         // Checked before any row exists, so a photo that was never going to work leaves nothing.
         encoder.preflight(photo)?.let {
-            return tally.withFailure("${photo.displayName} — ${it.reason}")
+            return tally.withFailure(photo, it.reason)
         }
 
         var failure: String? = null
         var written = 0L
 
         val published = repository.publishHeic(photo) { uri ->
-            when (val result = encodeInto(uri, photo, forEncoding, options.quality, rotation)) {
+            when (val result = encodeInto(uri, photo, forEncoding, options.quality, rotation, trailerStart)) {
                 is EncodeResult.Failure -> {
                     failure = result.reason
                     0L
@@ -592,9 +746,7 @@ class ConversionEngine private constructor(context: Context) {
                     result.bytes
                 }
             }
-        } ?: return tally.withFailure(
-            "${photo.displayName} — ${failure ?: "could not be saved to the gallery"}"
-        )
+        } ?: return tally.withFailure(photo, failure ?: "could not be saved to the gallery")
 
         // MediaStore silently appends " (1)" when the name is taken. Getting a different name
         // back means something was already there, which is not what this was asked to do — so the
@@ -613,7 +765,7 @@ class ConversionEngine private constructor(context: Context) {
         }
 
         toDelete += photo.uri
-        val counted = countConverted(tally, photo, metadata, motionPhoto, mirrored, written)
+        val counted = countConverted(tally, photo, metadata, motionOutcome, mirrored, written)
         return if (published.datesApplied) {
             counted
         } else {
@@ -638,11 +790,12 @@ class ConversionEngine private constructor(context: Context) {
         forEncoding: JpegMetadata,
         quality: Int,
         rotation: Int,
+        trailerStart: Long?,
     ): EncodeResult {
         if (directWriteWorks) {
             val direct = repository.openForWrite(uri)?.use { descriptor ->
                 encoder.encodeToDescriptor(
-                    photo, forEncoding, quality, rotation, descriptor.fileDescriptor,
+                    photo, forEncoding, quality, rotation, descriptor.fileDescriptor, trailerStart,
                 )
             } ?: EncodeResult.Failure("could not open the new file for writing")
 
@@ -657,7 +810,7 @@ class ConversionEngine private constructor(context: Context) {
         }
 
         val staged = when (
-            val result = encoder.encodeToStaging(photo, forEncoding, quality, rotation)
+            val result = encoder.encodeToStaging(photo, forEncoding, quality, rotation, trailerStart)
         ) {
             is EncodeResult.Failure -> return result
             is EncodeResult.Success -> result
@@ -728,6 +881,10 @@ class ConversionEngine private constructor(context: Context) {
      */
     private suspend fun confirmDeletion(uris: List<Uri>): DeletionAnswer {
         if (uris.isEmpty()) return DeletionAnswer(granted = true, deleted = 0)
+
+        // The run now blocks on a confirmation dialog until the user acts, so make some noise:
+        // a long batch often finishes with the phone away, and this is where attention is needed.
+        DeletionAlert.beep()
 
         val request = PendingDeletion(uris.chunked(DELETE_BATCH_SIZE))
         synchronized(deletionLock) { pendingDeletion = request }
@@ -816,8 +973,8 @@ class ConversionEngine private constructor(context: Context) {
         /** Below this, a run cannot make meaningful progress and should not start. */
         private const val MIN_FREE_SPACE_BYTES = 256L * 1024 * 1024
 
-        /** Motion-photo trailer markers sit at the very end of the file. */
-        private const val TAIL_SCAN_BYTES = 64 * 1024
+        /** JPGs smaller than this (1 MB) are passed over: too little to gain to be worth re-encoding. */
+        private const val MIN_CONVERT_SIZE_BYTES = 1024L * 1024
 
         const val NO_ENCODER = "This device has no HEIC (HEVC) encoder, so nothing can be converted."
 

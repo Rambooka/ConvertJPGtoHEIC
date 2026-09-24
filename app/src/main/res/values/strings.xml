@@ -9,10 +9,18 @@
     <string name="range_title">Photos taken between</string>
 
     <string name="opt_only_smaller">Only keep the HEIC if it is smaller</string>
+    <string name="opt_skip_small">Skip JPGs under 1 MB</string>
     <string name="opt_skip_existing">Skip photos already converted</string>
-    <string name="opt_skip_lossy">Skip motion photos</string>
-    <string name="opt_skip_lossy_hint">Converting a motion photo discards its embedded video for
-        good. Leave this on unless you only want the still.</string>
+
+    <string name="opt_motion_heading">Motion photos</string>
+    <string name="opt_motion_keep_video">Keep the video (save as a HEIC motion photo)</string>
+    <string name="opt_motion_skip">Skip them (leave untouched)</string>
+    <string name="opt_motion_drop_video">Convert to a still (discard the video)</string>
+    <string name="opt_motion_hint">Samsung motion photos keep their video: the still is re-encoded
+        to HEIC and the original video is re-attached, so it still plays. A motion photo whose video
+        can\'t be carried across is skipped rather than flattened. \"Only keep if smaller\" still
+        applies.</string>
+
     <string name="opt_delete_originals">Delete originals after converting</string>
 
     <string name="action_dry_run">Dry run</string>
@@ -23,6 +31,13 @@
     <string name="action_cleanup_hint">Finds JPGs in this range that already have a HEIC beside
         them — left behind by a run that was cancelled or whose delete prompt was declined.</string>
     <string name="action_cancel">Cancel</string>
+    <string name="action_view">View</string>
+    <string name="action_delete">Delete</string>
+    <string name="failures_heading">Failed photos</string>
+    <string name="failures_subheading">%1$d could not be converted. Originals are untouched — view to check, or delete.</string>
+    <string name="failed_detail">%1$s · %2$s</string>
+    <string name="view_failed">Couldn\'t open that photo.</string>
+    <string name="deleted_one">Deleted %1$s.</string>
 
     <string name="permission_needed">This app needs full access to your photos. Tap to grant it.</string>
     <string name="permission_partial">Only selected photos are shared with this app, so a date
@@ -33,7 +48,11 @@
 
     <string name="storage_free">Storage: %1$s free</string>
     <string name="pending_delete">Next deletion prompt: %1$d of %2$d</string>
-    <string name="run_counters">Skipped: motion %1$d · other %2$d · failed %3$d</string>
+    <string name="run_saved">Converted %1$d · saved %2$s so far</string>
+    <string name="run_saved_stills">  Stills: %1$d · saved %2$s</string>
+    <string name="run_saved_motion">  Motion: %1$d · saved %2$s</string>
+    <string name="run_skipped_small">Skipped under 1 MB: %1$d · %2$s left as JPG</string>
+    <string name="run_counters">Skipped: motion %1$d · already done %2$d · not smaller %3$d · name clash %4$d · failed %5$d</string>
 
     <string name="quality_label">HEIC quality: %1$d</string>
     <string name="pick_range_first">Pick a date range first.</string>
