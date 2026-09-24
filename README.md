@@ -26,6 +26,7 @@ Three run modes:
 Options, remembered between runs:
 
 - **Only keep the HEIC if it is smaller** — discards a result that came out no smaller, rather than trading quality for nothing.
+- **Skip JPGs under 1 MB** (on by default) — passes over photos too small to be worth re-encoding, before they are even decoded. The report counts them and the storage they still occupy.
 - **Skip photos already converted**
 - **Motion photos** — a three-way choice, defaulting to *Keep the video*:
   - **Keep the video (save as a HEIC motion photo)** — re-encode the still and re-attach the original video, so nothing is lost. Only Samsung SEF motion photos can be carried across this way; a motion photo whose video cannot (a Google/Pixel one, whose video lives in an XMP container `HeifWriter` has no channel for) is skipped rather than silently flattened.
@@ -54,6 +55,23 @@ of it (see `RunReport` in [ConversionEngine.kt](app/src/main/java/com/example/co
 - **The video of a *non-Samsung* motion photo** (a Google/Pixel one, whose video lives in an XMP container rather than a SEF trailer) — such a photo is skipped under *Keep the video* rather than flattened. The video of *any* motion photo is discarded only if you choose *Convert to a still*.
 - **Mirrored orientations** (EXIF values 2, 4, 5, 7) cannot be expressed as a container rotation, so the EXIF tag is left in place and may not be applied by every viewer.
 
+## The report
+
+Both the live progress and the summary at the end break the saving down, rather than giving a single
+number:
+
+- **Stills and motion photos are counted and measured separately**, so you can see how much came from
+  each. The figures update as the run goes, not just at the end.
+- **Skipped photos are broken out by reason** — already converted, HEIC not smaller, under 1 MB
+  (with the bytes left untouched), motion photos passed over.
+- **Failures are listed per photo** — name, size, and why — each with a **View** button to check the
+  original and a **Delete** button to remove it (through the system's own confirmation, since a failed
+  original is the only copy). A whole-run failure with no single file behind it (no encoder, storage
+  full) is stated once, without buttons.
+
+When a run pauses to have a batch of originals deleted, the phone sounds **five short beeps**, so a
+long run left in a pocket does not sit unnoticed waiting on the confirmation.
+
 ## Requirements
 
 - **Android 11 (API 30)** or newer; targets API 36.
@@ -78,13 +96,14 @@ Plain Views with view binding, coroutines, no DI framework, no Compose.
 
 | File | Role |
 | --- | --- |
-| [MainActivity.kt](app/src/main/java/com/example/convertjpgtoheic/MainActivity.kt) | The whole UI: date picker, options, progress, and the system delete-confirmation dialogs. |
+| [MainActivity.kt](app/src/main/java/com/example/convertjpgtoheic/MainActivity.kt) | The whole UI: date picker, options, progress, the summary report with its per-failure view/delete list, and the system delete-confirmation dialogs. |
 | [ConversionEngine.kt](app/src/main/java/com/example/convertjpgtoheic/ConversionEngine.kt) | Owns the run. Process-scoped, not tied to a ViewModel, so the work survives the Activity going away. Exposes `UiState` as a `StateFlow`. |
 | [ConversionService.kt](app/src/main/java/com/example/convertjpgtoheic/ConversionService.kt) | Foreground service. Does no work itself — it pins the process for the minutes a bulk run takes and mirrors engine state into a notification. |
 | [PhotoRepository.kt](app/src/main/java/com/example/convertjpgtoheic/PhotoRepository.kt) | MediaStore queries, inserts, and output naming/placement. |
 | [HeicEncoder.kt](app/src/main/java/com/example/convertjpgtoheic/HeicEncoder.kt) | Wraps `androidx.heifwriter`. Writes straight into the MediaStore descriptor where the device allows it, and falls back to staging-and-copy if not. |
 | [JpegSegments.kt](app/src/main/java/com/example/convertjpgtoheic/JpegSegments.kt) | Walks the JPEG marker segments to pull out EXIF and detect XMP, ICC, and Google-style (XMP) motion photos. Stops at the first scan, so it costs a few KB per photo. |
 | [SefTrailer.kt](app/src/main/java/com/example/convertjpgtoheic/SefTrailer.kt) | Parses the Samsung SEF trailer from a file's tail: whether it is a motion photo, and the byte offset where the video trailer begins so it can be re-attached to the HEIC. Pure Kotlin, unit-tested. |
+| [DeletionAlert.kt](app/src/main/java/com/example/convertjpgtoheic/DeletionAlert.kt) | Sounds the five beeps when a run pauses for deletion confirmation. Fire-and-forget on its own thread, and silent on a device that cannot open a tone generator. |
 | [DateRange.kt](app/src/main/java/com/example/convertjpgtoheic/DateRange.kt) | Converts the picker's UTC day picks into local-time bounds. Deliberately free of Android types so it can be unit-tested directly. |
 
 A few design decisions worth knowing about:
