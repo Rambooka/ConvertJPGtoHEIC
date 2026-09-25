@@ -58,9 +58,25 @@ waits while the scanner is still making progress instead of on a fixed clock.
 3. **Video bitrate** is 55% of the source's (`HEVC_BITRATE_SHARE`), deliberately conservative: the
    result was visually identical. Lower is probably fine; ffmpeg SSIM would settle it (not
    installed — ask before `winget install Gyan.FFmpeg`).
-4. **Video: not handled yet** — `.mov` (15), `.avi` (2), anything above 4K. Deliberately skipped:
-   slow motion, hyperlapse and any other Samsung special mode (they carry a SEF trailer:
-   `SlowMotion_Data`, `HyperLapse_Data_Speed`; normal videos carry none).
+4. **Video: what the full run will skip** (scanned all 542 videos, 18.4 GB). Any video ending in
+   a Samsung SEF trailer is currently skipped — 75 videos, 2.7 GB:
+
+   | SEF record | videos | size | notes |
+   |---|---|---|---|
+   | `SlowMotion_Data` | 7 | 628 MB | skip — user's decision |
+   | `HyperLapse_Data_Speed` | 17 | 387 MB | skip — user's decision |
+   | `HighlightVideo_Data` only | 32 | 1,250 MB | Gallery's auto highlight reel ("AutoSum"), 300–540 B. Ordinary videos |
+   | `Single_Take_*` | 16 | 350 MB | part of a Single Take group |
+   | `Directors_View_Info` | 2 | 63 MB | multi-camera recording |
+   | `VideoEditor_Re_Edit_Data` | 1 | 61 MB | Samsung editor project |
+
+   **Offered and deferred by the user:** convert the `HighlightVideo_Data`-only videos too, copying
+   the SEF trailer across verbatim after the last box (its offsets are self-relative, and
+   MediaMuxer output ends in `mdat`), for ~0.5 GB more. Keep skipping the rest. Match on record
+   *types* (0x08b0 highlight, 0x0890 slow-mo, 0x0d00 hyperlapse), not names: in some files the
+   records sit more than 3 KB before EOF.
+
+   Also not handled yet: `.mov` (15), `.avi` (2), anything above 4K.
 5. **Photos: 84 HEICs remain undated** — expected to be images with no capture time anywhere
    (downloads, templates). Check the repair report's "No date anywhere" count against that.
 
@@ -96,13 +112,13 @@ up on close.
 
 ### 4. State left on the device
 
-The user's own settings (backed up in the session scratchpad as `prefs-before-video-test.xml`):
-`motionPolicy=DROP_VIDEO`, `shrinkOversized=true`, range 2021-09-16 → 2026-09-26, other keys
-default. **Restore before a real run.**
-
 The 7 `*_HEVC.mp4` copies from the keep-originals tests were deleted (originals intact), so
-those videos will be converted normally. App settings are currently range 14–26 Oct 2021 with
-"Delete originals" **on**.
+those videos will be converted normally.
+
+**App settings as left, at the user's request:** range **1 Jan 2000 → 26 Sep 2026** (covers all
+542 videos and all photos), **Delete originals on**, `shrinkOversized=true`,
+`motionPolicy=DROP_VIDEO`. The full video run has **not** been started. The user's older
+photo range (from 2021-09-16) is superseded by this.
 
 ---
 
