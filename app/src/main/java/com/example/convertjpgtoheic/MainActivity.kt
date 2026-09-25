@@ -93,6 +93,8 @@ class MainActivity : AppCompatActivity() {
         binding.dryRunButton.setOnClickListener { startRun(RunMode.DRY_RUN) }
         binding.convertButton.setOnClickListener { confirmThenConvert() }
         binding.cleanupButton.setOnClickListener { confirmThenCleanUp() }
+        binding.repairButton.setOnClickListener { confirmThenRepair() }
+        binding.videoButton.setOnClickListener { confirmThenConvertVideos() }
         binding.cancelButton.setOnClickListener { engine.cancel() }
 
         binding.qualitySlider.addOnChangeListener { _, value, _ ->
@@ -290,6 +292,37 @@ class MainActivity : AppCompatActivity() {
      * it has been passing over. On a run of thousands the counters are the only way to see that
      * most of the library is being skipped rather than converted.
      */
+    private fun repairStatus(p: RunProgress): String = buildString {
+        appendLine(
+            when (p.repairPhase) {
+                RepairPhase.REFRESHING -> getString(R.string.progress_repair_refreshing, p.done, p.total)
+                RepairPhase.WRITING -> getString(
+                    R.string.progress_repair_writing,
+                    p.done + 1, p.total, p.currentName, p.repairedDates, p.repairedRotations,
+                )
+                else -> getString(
+                    R.string.progress_repair_checking,
+                    p.done + 1, p.total, p.currentName, p.repairedDates, p.repairedRotations, p.awaitingPermission,
+                )
+            }
+        )
+        append(etaText(p.remainingMs))
+    }
+
+    /** "About 12 min left · done around 6:40 pm", in the phone's own 12/24-hour style. */
+    private fun etaText(remainingMs: Long?): String {
+        if (remainingMs == null) return getString(R.string.eta_estimating)
+        val minutes = (remainingMs + 59_999) / 60_000
+        val left = when {
+            minutes < 1 -> "under a minute"
+            minutes < 60 -> "$minutes min"
+            else -> "${minutes / 60} h ${minutes % 60} min"
+        }
+        val doneAt = android.text.format.DateFormat.getTimeFormat(this)
+            .format(java.util.Date(System.currentTimeMillis() + remainingMs))
+        return getString(R.string.eta_line, left, doneAt)
+    }
+
     private fun runningStatus(progress: RunProgress, headline: Int): String = buildString {
         appendLine(
             getString(headline, progress.done + 1, progress.total, progress.currentName)
@@ -362,8 +395,10 @@ class MainActivity : AppCompatActivity() {
      * Activity cannot be relied on to survive it.
      */
     private fun startRun(mode: RunMode) {
-        val current = range
-        if (current == null || !current.isValid) {
+        // A repair covers the whole library, so it is the one run that needs no range.
+        val current = range?.takeIf { it.isValid }
+            ?: if (mode == RunMode.REPAIR) DateRange(0L, Long.MAX_VALUE) else null
+        if (current == null) {
             binding.statusText.setText(R.string.pick_range_first)
             return
         }
@@ -456,6 +491,41 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    private fun readVideoPermission() =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.READ_MEDIA_VIDEO
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+
+    private fun confirmThenConvertVideos() {
+        if (range == null) {
+            binding.statusText.setText(R.string.pick_range_first)
+            return
+        }
+        // Asked for only here, when videos are actually wanted, rather than up front.
+        if (!granted(readVideoPermission())) {
+            binding.statusText.setText(R.string.videos_need_permission)
+            permissionLauncher.launch(arrayOf(readVideoPermission()))
+            return
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.videos_title)
+            .setMessage(R.string.videos_message)
+            .setPositiveButton(R.string.videos_button) { _, _ -> startRun(RunMode.VIDEO) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun confirmThenRepair() {
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.repair_title)
+            .setMessage(R.string.repair_message)
+            .setPositiveButton(R.string.action_repair_button) { _, _ -> startRun(RunMode.REPAIR) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
     private fun observeEngine() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -474,7 +544,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun launchDeleteRequest(request: DeletionRequest) {
         try {
-            val sender = engine.createDeleteIntentSender(request.uris)
+            val sender = engine.createConsentIntentSender(request)
             engine.consumeDeletionRequest()
             deleteLauncher.launch(IntentSenderRequest.Builder(sender).build())
         } catch (e: Exception) {
@@ -489,6 +559,8 @@ class MainActivity : AppCompatActivity() {
         binding.dryRunButton.isEnabled = usable && EncoderSupport.hasHevcEncoder
         binding.convertButton.isEnabled = usable && EncoderSupport.hasHevcEncoder
         binding.cleanupButton.isEnabled = usable
+        binding.repairButton.isEnabled = usable
+        binding.videoButton.isEnabled = usable && EncoderSupport.hasHevcEncoder
         binding.rangeButton.isEnabled = !busy
         binding.cancelButton.isVisible(state is UiState.Working || state is UiState.AwaitingDeletion)
         binding.progressBar.isVisible(busy)
@@ -527,6 +599,8 @@ class MainActivity : AppCompatActivity() {
                 binding.progressBar.setProgressCompat(state.progress.done, true)
                 binding.statusText.text = when (state.mode) {
                     RunMode.CLEAN_UP -> getString(R.string.progress_cleanup)
+                    RunMode.REPAIR -> repairStatus(state.progress)
+                    RunMode.VIDEO -> videoStatus(state.progress)
                     RunMode.DRY_RUN -> runningStatus(state.progress, R.string.progress_measuring)
                     RunMode.CONVERT -> runningStatus(state.progress, R.string.progress_converting)
                 }
@@ -537,10 +611,11 @@ class MainActivity : AppCompatActivity() {
                 binding.progressBar.max = state.total
                 binding.progressBar.setProgressCompat(state.done, true)
                 binding.statusText.text = resources.getQuantityString(
-                    if (state.lowOnSpace) {
-                        R.plurals.awaiting_deletion_low_space
-                    } else {
-                        R.plurals.awaiting_deletion
+                    when {
+                        state.mode == RunMode.REPAIR -> R.plurals.awaiting_repair_access
+                        state.mode == RunMode.VIDEO -> R.plurals.awaiting_video_deletion
+                        state.lowOnSpace -> R.plurals.awaiting_deletion_low_space
+                        else -> R.plurals.awaiting_deletion
                     },
                     state.pending,
                     state.pending,
@@ -562,12 +637,22 @@ class MainActivity : AppCompatActivity() {
             RunMode.DRY_RUN -> "Dry run"
             RunMode.CONVERT -> "Conversion"
             RunMode.CLEAN_UP -> "Clean-up"
+            RunMode.REPAIR -> "Repair"
+            RunMode.VIDEO -> "Video conversion"
         }
         appendLine(if (report.cancelled) "$label cancelled — partial results below." else "$label complete.")
         appendLine()
 
         if (report.mode == RunMode.CLEAN_UP) {
             describeCleanUp(report)
+            return@buildString
+        }
+        if (report.mode == RunMode.REPAIR) {
+            describeRepair(report)
+            return@buildString
+        }
+        if (report.mode == RunMode.VIDEO) {
+            describeVideos(report)
             return@buildString
         }
 
@@ -676,6 +761,64 @@ class MainActivity : AppCompatActivity() {
                             ". Use \"Clean up leftovers\" to clear them later."
                         }
                 )
+        }
+    }
+
+    private fun StringBuilder.describeVideos(report: RunReport) {
+        if (report.converted == 0) {
+            appendLine("No videos were converted.")
+        } else {
+            appendLine("Videos converted:  ${report.converted}")
+            appendLine("Original size:     ${formatSize(report.originalBytes)}")
+            appendLine("HEVC size:         ${formatSize(report.heicBytes)}")
+            appendLine("Space saved:       ${formatSize(report.savedBytes)} (${report.savedPercent}%)")
+        }
+        if (report.videoSkippedSpecial > 0) appendLine("Left alone:        ${report.videoSkippedSpecial} slow-motion/hyperlapse")
+        if (report.videoSkippedCodec > 0) appendLine("Already HEVC:      ${report.videoSkippedCodec}")
+        if (report.videoSkippedFormat > 0) appendLine("Not handled yet:   ${report.videoSkippedFormat} (.mov, .avi, 8K…)")
+        if (report.skippedNotSmaller > 0) appendLine("Not smaller:       ${report.skippedNotSmaller} (kept the original)")
+        if (report.skippedExisting > 0) appendLine("Already converted: ${report.skippedExisting}")
+        when (report.deletionOutcome) {
+            DeletionOutcome.COMPLETED -> appendLine("Originals deleted: ${report.deletedOriginals}")
+            DeletionOutcome.DECLINED -> appendLine(
+                "Originals kept:    deletion was declined (${report.deletedOriginals} deleted before that)"
+            )
+            else -> if (report.converted > 0) appendLine("Originals were kept.")
+        }
+    }
+
+    private fun videoStatus(p: RunProgress): String = buildString {
+        appendLine(
+            getString(
+                R.string.progress_video,
+                p.done + 1, p.total, (p.itemFraction * 100).toInt(), p.currentName, p.converted, formatSize(p.savedBytes),
+            )
+        )
+        append(etaText(p.remainingMs))
+    }
+
+    private fun StringBuilder.describeRepair(report: RunReport) {
+        appendLine("HEICs checked:     ${report.repairChecked}")
+        appendLine("Dates restored:    ${report.repairedDates}")
+        appendLine("Rotation fixed:    ${report.repairedRotations}")
+        if (report.repairedDates == 0 && report.repairedRotations == 0 && report.failureCount == 0 &&
+            report.repairDeclined == 0 && !report.cancelled
+        ) {
+            appendLine()
+            appendLine("Nothing needed fixing.")
+        }
+        if (report.repairDeclined > 0) {
+            appendLine("Not allowed:       ${report.repairDeclined} (left as they were)")
+        }
+        if (report.repairNoDateSource > 0) {
+            appendLine(
+                "No date anywhere:  ${report.repairNoDateSource} (no capture time in the photo or its name)"
+            )
+        }
+        if (report.repairUnverified > 0) {
+            appendLine(
+                "Not yet showing:   ${report.repairUnverified} (rewritten; the gallery may catch up after a rescan)"
+            )
         }
     }
 

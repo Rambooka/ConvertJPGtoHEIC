@@ -4,6 +4,7 @@ import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.database.Cursor
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.provider.MediaStore
 import android.system.Os
@@ -45,8 +46,34 @@ object PhotoNaming {
         return if (allowed) "$normalised/" else "Pictures/$normalised/"
     }
 
+    /** [targetRelativePath] for the video collection, which accepts `Movies/` as well. */
+    fun targetVideoPath(sourcePath: String): String {
+        val normalised = sourcePath.trim('/')
+        if (normalised.isEmpty()) return "Movies/"
+        val primary = normalised.substringBefore('/')
+        val allowed = ALLOWED_VIDEO_DIRS.any { it.equals(primary, ignoreCase = true) }
+        return if (allowed) "$normalised/" else "Movies/$normalised/"
+    }
+
     private val ALLOWED_PRIMARY_DIRS = listOf("DCIM", "Pictures")
+    private val ALLOWED_VIDEO_DIRS = listOf("DCIM", "Movies", "Pictures")
 }
+
+/** One HEIC in the library, with what a repair needs to judge and fix it. */
+data class HeicRow(
+    val uri: Uri,
+    val id: Long,
+    val displayName: String,
+    val sizeBytes: Long,
+    /** Null when MediaStore has no capture date, which is what a repair looks for. */
+    val dateTakenMs: Long?,
+    val orientation: Int,
+    /** Filesystem path, used only to ask the scanner to re-read the file. */
+    val path: String?,
+)
+
+/** What MediaStore currently says about a file's date and orientation. */
+data class CaptureState(val dateTakenMs: Long?, val orientation: Int)
 
 /** One JPG in the library, with everything we need to rebuild its MediaStore row as a HEIC. */
 data class SourcePhoto(
@@ -498,8 +525,235 @@ class PhotoRepository(private val context: Context) {
     private fun Cursor.getLongOrNull(index: Int): Long? =
         if (isNull(index)) null else getLong(index)
 
+    // region videos
+
+    private val videoCollection: Uri = MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+
+    /** Videos captured within the range, oldest first — the same date rule as [queryJpgs]. */
+    fun queryVideos(startMs: Long, endMs: Long): List<SourceVideo> {
+        val taken = MediaStore.Video.Media.DATE_TAKEN
+        val modified = MediaStore.Video.Media.DATE_MODIFIED
+        val projection = arrayOf(
+            MediaStore.Video.Media._ID,
+            MediaStore.Video.Media.DISPLAY_NAME,
+            MediaStore.Video.Media.RELATIVE_PATH,
+            MediaStore.Video.Media.VOLUME_NAME,
+            MediaStore.Video.Media.SIZE,
+            taken,
+            MediaStore.Video.Media.DURATION,
+            MediaStore.Video.Media.BITRATE,
+            MediaStore.Video.Media.CAPTURE_FRAMERATE,
+            MediaStore.Video.Media.WIDTH,
+            MediaStore.Video.Media.HEIGHT,
+            MediaStore.Video.Media.MIME_TYPE,
+        )
+        val selection = "(($taken IS NOT NULL AND $taken > 0 AND $taken BETWEEN ? AND ?) OR " +
+            "(($taken IS NULL OR $taken <= 0) AND $modified BETWEEN ? AND ?))"
+        val args = arrayOf(startMs.toString(), endMs.toString(), (startMs / 1000).toString(), (endMs / 1000).toString())
+        val out = ArrayList<SourceVideo>()
+        resolver.query(videoCollection, projection, selection, args, "$taken ASC, $modified ASC")?.use { c ->
+            while (c.moveToNext()) {
+                val id = c.getLong(0)
+                out += SourceVideo(
+                    uri = ContentUris.withAppendedId(videoCollection, id),
+                    displayName = c.getString(1) ?: continue,
+                    relativePath = c.getString(2) ?: "Movies/",
+                    volumeName = c.getString(3) ?: MediaStore.VOLUME_EXTERNAL_PRIMARY,
+                    sizeBytes = c.getLong(4),
+                    dateTakenMs = c.getLongOrNull(5)?.takeIf { it > 0 },
+                    durationMs = c.getLong(6),
+                    bitrate = c.getLongOrNull(7),
+                    captureFramerate = if (c.isNull(8)) null else c.getDouble(8),
+                    width = c.getInt(9),
+                    height = c.getInt(10),
+                    mimeType = c.getString(11),
+                )
+            }
+        }
+        return out
+    }
+
+    /** Whether a video called [name] already sits in the folder [video]'s copy would go to. */
+    fun videoExistsBeside(video: SourceVideo, name: String): Boolean =
+        resolver.query(
+            MediaStore.Video.Media.getContentUri(video.volumeName),
+            arrayOf(MediaStore.Video.Media._ID),
+            "${MediaStore.Video.Media.RELATIVE_PATH} = ? AND ${MediaStore.Video.Media.DISPLAY_NAME} = ?",
+            arrayOf(PhotoNaming.targetVideoPath(video.relativePath), name),
+            null,
+        )?.use { it.count > 0 } ?: false
+
+    /**
+     * Publishes [staged] as [SourceVideo.convertedName] beside the original, and returns its URI.
+     *
+     * Staged-then-copied rather than encoded in place: Transformer writes to a file path, and a
+     * half-written row must never be what the gallery shows.
+     */
+    fun publishVideo(video: SourceVideo, staged: java.io.File): Uri? {
+        val values = ContentValues().apply {
+            put(MediaStore.Video.Media.DISPLAY_NAME, video.convertedName)
+            put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+            put(MediaStore.Video.Media.RELATIVE_PATH, PhotoNaming.targetVideoPath(video.relativePath))
+            video.dateTakenMs?.let { put(MediaStore.Video.Media.DATE_TAKEN, it) }
+            put(MediaStore.Video.Media.IS_PENDING, 1)
+        }
+        val uri = try {
+            resolver.insert(MediaStore.Video.Media.getContentUri(video.volumeName), values)
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not create a row for ${video.convertedName}", e)
+            null
+        } ?: return null
+        return try {
+            val copied = resolver.openOutputStream(uri, "w")?.use { out ->
+                staged.inputStream().use { it.copyTo(out, COPY_BUFFER) }
+            } ?: 0L
+            if (copied != staged.length()) throw IllegalStateException("copied $copied of ${staged.length()} bytes")
+            resolver.update(uri, ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }, null, null)
+            uri
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not publish ${video.convertedName}", e)
+            discard(uri)
+            null
+        }
+    }
+
+    /** Gives a converted video its original's name once the original is gone. */
+    fun renameVideo(uri: Uri, name: String): Boolean = runCatching {
+        resolver.update(uri, ContentValues().apply { put(MediaStore.Video.Media.DISPLAY_NAME, name) }, null, null) > 0
+    }.getOrElse {
+        Log.w(TAG, "Could not rename $uri to $name", it)
+        false
+    }
+
+    // endregion
+
+    // region repair
+
+    /** Every HEIC in the library, whatever its date — a repair looks at the lot. */
+    fun queryHeics(): List<HeicRow> {
+        val projection = arrayOf(
+            MediaStore.Images.Media._ID,
+            MediaStore.Images.Media.DISPLAY_NAME,
+            MediaStore.Images.Media.SIZE,
+            MediaStore.Images.Media.DATE_TAKEN,
+            MediaStore.Images.Media.ORIENTATION,
+            @Suppress("DEPRECATION") MediaStore.Images.Media.DATA,
+        )
+        val rows = ArrayList<HeicRow>()
+        resolver.query(
+            collection,
+            projection,
+            "${MediaStore.Images.Media.MIME_TYPE} IN (?, ?)",
+            arrayOf(HEIC_MIME, "image/heif"),
+            "${MediaStore.Images.Media._ID} ASC",
+        )?.use { c ->
+            while (c.moveToNext()) {
+                val id = c.getLong(0)
+                rows += HeicRow(
+                    uri = ContentUris.withAppendedId(collection, id),
+                    id = id,
+                    displayName = c.getString(1) ?: continue,
+                    sizeBytes = c.getLong(2),
+                    dateTakenMs = c.getLongOrNull(3)?.takeIf { it > 0 },
+                    orientation = c.getInt(4),
+                    path = c.getString(5),
+                )
+            }
+        }
+        return rows
+    }
+
+    /**
+     * Capture instants of the JPGs still in the library, keyed by [nameKey]. A HEIC whose original
+     * survives can then be given its exact timezone instead of an assumed one. Names that two JPGs
+     * share with different dates are dropped rather than guessed between.
+     */
+    fun jpgCaptureTimesByName(): Map<String, Long> {
+        val out = HashMap<String, Long>()
+        val ambiguous = HashSet<String>()
+        resolver.query(
+            collection,
+            arrayOf(MediaStore.Images.Media.DISPLAY_NAME, MediaStore.Images.Media.DATE_TAKEN),
+            "${MediaStore.Images.Media.MIME_TYPE} IN (?, ?) AND ${MediaStore.Images.Media.DATE_TAKEN} > 0",
+            arrayOf("image/jpeg", "image/jpg"),
+            null,
+        )?.use { c ->
+            while (c.moveToNext()) {
+                val key = nameKey(c.getString(0) ?: continue)
+                val taken = c.getLong(1)
+                val previous = out.put(key, taken)
+                if (previous != null && kotlin.math.abs(previous - taken) > DATE_MATCH_TOLERANCE_MS) ambiguous += key
+            }
+        }
+        ambiguous.forEach { out.remove(it) }
+        return out
+    }
+
+    /** MediaStore's current date and orientation for each of [ids]. */
+    fun captureStates(ids: Collection<Long>): Map<Long, CaptureState> {
+        val out = HashMap<Long, CaptureState>()
+        // Chunked: SQLite caps the number of bound parameters in one statement.
+        for (chunk in ids.chunked(QUERY_CHUNK)) {
+            resolver.query(
+                collection,
+                arrayOf(MediaStore.Images.Media._ID, MediaStore.Images.Media.DATE_TAKEN, MediaStore.Images.Media.ORIENTATION),
+                "${MediaStore.Images.Media._ID} IN (${chunk.joinToString(",") { "?" }})",
+                chunk.map { it.toString() }.toTypedArray(),
+                null,
+            )?.use { c ->
+                while (c.moveToNext()) {
+                    out[c.getLong(0)] = CaptureState(c.getLongOrNull(1)?.takeIf { it > 0 }, c.getInt(2))
+                }
+            }
+        }
+        return out
+    }
+
+    /**
+     * Asks the media scanner to re-read [paths] and waits for it, so MediaStore reflects edits made
+     * to files in place. Returns how many were scanned.
+     *
+     * Waits as long as the scanner keeps making progress, rather than for a fixed time: its pace
+     * varies with the device and the file, and a fixed budget cut the wait short while it was still
+     * working steadily. Gives up only if nothing completes for [SCAN_STALL_TIMEOUT_MS], or when
+     * [onProgress] returns false (the run was cancelled).
+     */
+    fun scanFiles(paths: List<String>, onProgress: (scanned: Int) -> Boolean = { true }): Int {
+        if (paths.isEmpty()) return 0
+        val scanned = java.util.concurrent.atomic.AtomicInteger()
+        MediaScannerConnection.scanFile(context, paths.toTypedArray(), null) { _, _ -> scanned.incrementAndGet() }
+
+        var last = 0
+        var lastProgressAt = System.currentTimeMillis()
+        while (true) {
+            Thread.sleep(SCAN_POLL_MS)
+            val now = scanned.get()
+            if (now != last) {
+                last = now
+                lastProgressAt = System.currentTimeMillis()
+                if (!onProgress(now)) break
+            }
+            if (now >= paths.size) break
+            if (System.currentTimeMillis() - lastProgressAt > SCAN_STALL_TIMEOUT_MS) {
+                Log.w(TAG, "Media scanner stalled at $now of ${paths.size}")
+                break
+            }
+        }
+        return scanned.get()
+    }
+
+    // endregion
+
     companion object {
         const val HEIC_MIME = "image/heic"
+
+        /** Matches a HEIC to the JPG it came from, whichever folder either ended up in. */
+        fun nameKey(displayName: String): String = PhotoNaming.baseName(displayName).lowercase()
+
+        private const val QUERY_CHUNK = 500
+        private const val COPY_BUFFER = 1024 * 1024
+        private const val SCAN_POLL_MS = 1_000L
+        private const val SCAN_STALL_TIMEOUT_MS = 120_000L
 
         /** EXIF stores whole seconds, so a rescanned HEIC may differ in the milliseconds. */
         private const val DATE_MATCH_TOLERANCE_MS = 1000L

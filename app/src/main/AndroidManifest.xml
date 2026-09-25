@@ -5,6 +5,8 @@
     <!-- Full library access, not Selected Photos: a date range can only be scanned across the
          whole library, and the UI tells the user when they have granted partial access instead. -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <!-- Only for "Convert videos": finding the MP4s and re-encoding them as HEVC. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <!-- Required so MediaStore hands us the *unredacted* original, GPS EXIF included. -->
     <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION" />

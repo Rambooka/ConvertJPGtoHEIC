@@ -79,6 +79,44 @@ This frees
             the space for the rest of the run.</item>
     </plurals>
     <string name="progress_cleanup">Looking for leftovers…</string>
+    <string name="action_videos">Convert videos to HEVC</string>
+    <string name="action_videos_hint">Re-encodes videos in this range from H.264 to HEVC, usually
+        about half the size. Slow motion, hyperlapse and other special camera modes are left alone.
+        Uses the delete and \"only keep if smaller\" options above.</string>
+    <string name="videos_title">Convert videos to HEVC?</string>
+    <string name="videos_message">Each H.264 video in this range is re-encoded as HEVC on the
+        phone\'s own encoder. The capture date, location and orientation are copied across and the
+        result is checked against the original before it is kept.\n\nWhile both exist, the new copy
+        is called name_HEVC.mp4. Once you confirm deleting the original it takes the original\'s
+        name.\n\nVideos take far longer than photos, and the phone gets warm: best done while
+        charging.</string>
+    <string name="videos_button">Convert</string>
+    <string name="videos_need_permission">Allow access to videos to convert them.</string>
+    <string name="progress_video">Converting video %1$d of %2$d · %3$d%%\n%4$s\nConverted %5$d · saved %6$s so far</string>
+    <plurals name="awaiting_video_deletion">
+        <item quantity="one">Waiting for you to confirm deleting %1$d original video.</item>
+        <item quantity="other">Waiting for you to confirm deleting %1$d original videos.</item>
+    </plurals>
+    <string name="action_repair">Repair converted photos</string>
+    <string name="action_repair_hint">Fixes HEICs that show sideways in some viewers (Phone Link,
+        for one) or that have lost their date and sit at the top of the gallery. Checks your whole
+        library, not just this range. Only the photo\'s details are rewritten — never the picture.</string>
+    <string name="repair_title">Repair converted photos?</string>
+    <string name="repair_message">This checks every HEIC on the phone and fixes two things:\n\n•
+        Rotation — so photos stand the right way up in every viewer, not just some.\n• Capture date —
+        so photos that lost theirs go back where they belong in the gallery. Where the original
+        timezone is unknown, New Zealand time is assumed.\n\nThe picture itself is never touched.
+        Android will ask you to allow the changes for photos this app no longer owns.</string>
+    <string name="action_repair_button">Repair</string>
+    <string name="progress_repair_checking">Checking %1$d of %2$d\n%3$s\nDates fixed: %4$d · Rotation fixed: %5$d\nWaiting for your permission: %6$d</string>
+    <string name="progress_repair_writing">Repairing %1$d of %2$d\n%3$s\nDates fixed: %4$d · Rotation fixed: %5$d</string>
+    <string name="progress_repair_refreshing">Refreshing the gallery: %1$d of %2$d photos\nAndroid is re-reading each repaired photo so the gallery shows the fix. Keep the app open until this finishes.</string>
+    <string name="eta_line">About %1$s left · done around %2$s</string>
+    <string name="eta_estimating">Working out how long this will take…</string>
+    <plurals name="awaiting_repair_access">
+        <item quantity="one">Waiting for you to allow the repair of %1$d photo.</item>
+        <item quantity="other">Waiting for you to allow the repair of %1$d photos.</item>
+    </plurals>
 
     <string name="confirm_title">Convert and delete?</string>
     <string name="confirm_delete_button">Convert and delete</string>

@@ -85,7 +85,12 @@ class ConversionService : Service() {
                 when (state) {
                     is UiState.Working -> notifyProgress(
                         buildNotification(
-                            text = if (state.progress.promptAt > 0) {
+                            text = if (state.mode == RunMode.REPAIR) {
+                                repairNotificationText(state.progress)
+                            } else if (state.mode == RunMode.VIDEO) {
+                                "${state.progress.currentName} · ${(state.progress.itemFraction * 100).toInt()}%" +
+                                    (state.progress.remainingMs?.let { " · ~${(it + 59_999) / 60_000} min left" } ?: "")
+                            } else if (state.progress.promptAt > 0) {
                                 "${state.progress.currentName}  " +
                                     "· delete at ${state.progress.pendingDeletions}/${state.progress.promptAt}"
                             } else {
@@ -102,7 +107,11 @@ class ConversionService : Service() {
                     is UiState.AwaitingDeletion -> notify(
                         NOTIFICATION_ID,
                         buildNotification(
-                            text = if (state.lowOnSpace) {
+                            text = if (state.mode == RunMode.REPAIR) {
+                                "Allow the repair of ${state.pending} photos"
+                            } else if (state.mode == RunMode.VIDEO) {
+                                "Confirm deleting ${state.pending} original videos"
+                            } else if (state.lowOnSpace) {
                                 "Storage low — confirm deleting ${state.pending} originals"
                             } else {
                                 "Confirm deleting ${state.pending} originals"
@@ -145,6 +154,11 @@ class ConversionService : Service() {
             // Clean-up converts nothing, so the conversion wording below would read as nonsense.
             report.mode == RunMode.CLEAN_UP && pending -> "Leftovers found — tap to remove them"
             report.mode == RunMode.CLEAN_UP -> "No leftover originals found"
+            report.mode == RunMode.REPAIR && report.cancelled -> "Repair cancelled"
+            report.mode == RunMode.REPAIR ->
+                "Repaired: ${report.repairedDates} dates, ${report.repairedRotations} rotations"
+            report.mode == RunMode.VIDEO && report.cancelled -> "Video conversion cancelled"
+            report.mode == RunMode.VIDEO -> "Converted ${report.converted} videos"
 
             report.failureCount > 0 && report.converted == 0 -> "Nothing converted — tap for details"
             pending -> "Converted ${report.converted} — tap to delete the originals"
@@ -171,6 +185,19 @@ class ConversionService : Service() {
         stopSelf()
     }
 
+    private fun repairNotificationText(p: RunProgress): String {
+        val step = when (p.repairPhase) {
+            RepairPhase.REFRESHING -> "Refreshing gallery"
+            RepairPhase.WRITING -> "Repairing"
+            else -> "Checking"
+        }
+        val eta = p.remainingMs?.let { ms ->
+            val minutes = (ms + 59_999) / 60_000
+            if (minutes < 60) " · ~$minutes min left" else " · ~${minutes / 60} h ${minutes % 60} min left"
+        }.orEmpty()
+        return step + eta
+    }
+
     private fun buildNotification(
         text: String,
         done: Int,
@@ -183,6 +210,8 @@ class ConversionService : Service() {
             when (mode) {
                 RunMode.DRY_RUN -> "Measuring photos"
                 RunMode.CLEAN_UP -> "Finding leftovers"
+                RunMode.REPAIR -> "Repairing photos"
+                RunMode.VIDEO -> "Converting videos"
                 RunMode.CONVERT -> "Converting photos"
             }
         )
