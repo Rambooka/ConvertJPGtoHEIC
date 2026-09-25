@@ -14,78 +14,132 @@ APK lands at `app/build/outputs/apk/debug/app-debug.apk`.
 
 ---
 
-## PICK UP HERE (2026-09-26)
+## PICK UP HERE (2026-09-26, evening)
 
-### 1. Uncommitted fixes in the working tree
+Everything below is on branch `fix/encoder-thread-leak-and-pixel-ceiling` (pushed, **not merged
+to `main`**). Installed on the phone and verified there.
 
-Three fixes from the 2026-09-26 session are **built, installed and verified on device, but
-NOT committed**. Commit them before starting anything new.
+### 1. Done and proven on the device
 
-```
-M app/src/main/java/com/example/convertjpgtoheic/ConversionEngine.kt
-M app/src/main/java/com/example/convertjpgtoheic/HeicEncoder.kt
-```
+**Wedging runs** (thread leak, bitmap budget, 64 MP ceiling) — see "Two ways a run used to wedge".
+Held over a ~4 h unattended run: 50 threads flat, 0 failures.
 
-- **HeifWriter thread leak** — `HeicEncoder` now passes its own `Handler` via
-  `Builder.setHandler()`, plus `release()` from `ConversionEngine` at end of run.
-- **`awaitClose()`** — `HeifWriter.close()` only *posts* the muxer stop, so the output file was
-  being measured before it had flushed.
-- **Bitmap budget + pixel ceiling** — see "Two ways a run used to wedge" below.
+**Converter output is now correct for new conversions** (`ConversionEngine.anchorCaptureTime`):
+- EXIF Orientation is **kept** matching the container `irot` (how Samsung's camera writes HEIC).
+  It used to be zeroed, which left MediaStore's `orientation` column — read from EXIF alone — at 0.
+- `OffsetTimeOriginal` is added, plus `DateTimeOriginal` when a file has only `DateTime`
+  (Google PhotoScan). See "Why converted photos lost their dates" below.
 
-### 2. Open problems, roughly in priority order
+**"Repair converted photos" button** (`HeicRepair`, `HeifExif`, `ExifEditor`) fixed the existing
+library in place — EXIF only, the image never re-encoded. Result of the full run:
+**4,084 dates restored, 15,351 rotations fixed**, confirmed from MediaStore (undated HEICs
+4,168 → 84; orientation ≠ 0: 20 → 15,371). Pre-flighted on 20 real files first: all verified, all
+decode identically in Windows' HEIF codec.
 
-**a. Capture dates missing on 16% of converted files.** 4150 of ~25,750 HEICs have
-`datetaken = NULL` in MediaStore, so they sort wrong in the gallery. Established:
+**Estimated completion time** on every repair step (`Eta`); the refresh step shows "X of Y", and
+waits while the scanner is still making progress instead of on a fixed clock.
 
-- The date is **not lost** — `DateTimeOriginal` is intact in every affected file's EXIF.
-- `DATE_TAKEN` **cannot be written after publish**. Verified directly: `content update` on a
-  published row returns no error and changes nothing, and the app's own
-  `applyCaptureDate` (updating a row it owns) fails the same way. MediaProvider treats it as
-  derived from the file. This is why `applyCaptureDate` logs
-  "Could not restamp the capture date" — the retry can never work.
-- A forced `scan_file` does **not** recover it.
-- The deciding factor is MediaProvider's EXIF extractor. Copying a good file and a bad file to
-  fresh paths and letting MediaProvider index them cleanly reproduces it exactly: good → correct
-  date, bad → NULL. So it is something *in the file*.
-- But **not** the HEIF container — a good and a bad file were byte-identical in box structure,
-  same `meta` size (2529), both with a valid `DateTimeOriginal`. The difference is inside the
-  EXIF block the app copies verbatim from the source JPEG. Bad file had no GPS IFD, no thumbnail
-  IFD1, no SubSecTime tags, 18 ExifIFD entries, and `ImageWidth`/`ImageLength` in IFD0; good file
-  had GPS + IFD1 + SubSecTime and 30 entries.
-- **UNRESOLVED:** which of those differences actually trips the extractor. Do not guess — bisect
-  it by mutating a copy of a failing file's EXIF and re-scanning.
-- Likely fix direction: synthesise a normalised EXIF block (extend `MinimalExif`) rather than
-  copying the source's verbatim, so extraction is predictable. Recovering the existing 4150 needs
-  a separate pass, and direct column writes won't do it.
+**"Convert videos to HEVC" button** (`VideoConverter`, `Mp4Metadata`) — first milestone done:
+- 720p30 test (6 clips, 140 MB): **83 MB, 40% saved**, ~5× real time.
+- 1080p60 test (28 s, 78 MB): **44 MB, 43% saved**, encoded in **3.9 s** (~7× real time).
+- Every copy verified: `hvc1`, identical `mvhd` capture time, `©xyz` location, rotation matrix,
+  frame rate; AAC audio passed through. The user compared them on the phone and in VLC:
+  identical, and the correct way up.
 
-**b. `addBitmap` has no timeout.** Any encoder stall wedges the whole run with no way out —
+### 2. Next steps
+
+1. **Video: exercise the delete-then-rename path.** Only tested with "Delete originals" off. With
+   it on, originals go in batches of 25 and each `<name>_HEVC.mp4` is renamed to the original's
+   name afterwards (`convertVideos.flushDeletions`). Untested on the device.
+2. **Video: a long run**, to see thermal throttling. 540 videos / 18.4 GB; at the measured pace
+   roughly 20–40 minutes of encoding.
+3. **Video bitrate** is 55% of the source's (`HEVC_BITRATE_SHARE`), deliberately conservative: the
+   result was visually identical. Lower is probably fine; ffmpeg SSIM would settle it (not
+   installed — ask before `winget install Gyan.FFmpeg`).
+4. **Video: not handled yet** — `.mov` (15), `.avi` (2), anything above 4K. Deliberately skipped:
+   slow motion, hyperlapse and any other Samsung special mode (they carry a SEF trailer:
+   `SlowMotion_Data`, `HyperLapse_Data_Speed`; normal videos carry none).
+5. **Photos: 84 HEICs remain undated** — expected to be images with no capture time anywhere
+   (downloads, templates). Check the repair report's "No date anywhere" count against that.
+
+### 3. Open problems
+
+**a. `addBitmap` has no timeout.** Any encoder stall wedges the whole run with no way out —
 `writer.stop(STOP_TIMEOUT_MS)` is never reached because the block happens earlier. The 64 MP
 ceiling avoids the one known trigger but is not a general guard. A real watchdog is awkward: the
 call blocks on the calling thread inside EGL, so timing it out means abandoning a thread
 mid-render.
 
-**c. Old panoramas "don't convert" — this was the original reported bug, and it is NOT a bug.**
-They encode fine, then get discarded by "Only keep if smaller". 2014–2016 panoramas are already
-compressed to ~0.29 bytes/px; HeifWriter's bitrate formula
-(`w*h*1.5*8*0.25*quality/100`) caps around 0.3 bytes/px at quality 80, so the HEIC comes out
-marginally larger. 2020/21 panoramas convert because they start at ~0.8 bytes/px.
-Dropping quality to ~70, or turning off "Only keep if smaller", would convert them — for little
-or no space saving. **Decide with the user whether this is worth doing at all.**
+**b. Old panoramas "don't convert" — the original reported bug, and NOT a bug.** They encode
+fine, then get discarded by "Only keep if smaller". 2014–2016 panoramas are already compressed to
+~0.29 bytes/px; HeifWriter's bitrate formula (`w*h*1.5*8*0.25*quality/100`) caps around
+0.3 bytes/px at quality 80, so the HEIC comes out marginally larger. **The user's call** whether
+to lower quality for them.
 
-**d. Two non-zero orphaned pending files** left by the wedged runs. Left in place because they
-hold real encoded data and a partial HEIC is harder to judge safe than an empty one. Once a run
-completes cleanly, anything still there is provably stale.
+**c. Two non-zero orphaned pending files** from the wedged runs, left because they hold real
+data: `DCIM/Camera/.pending-1790830549-20220129_131506.heic` (412318) and
+`.pending-1790465830-20190526_124424.heic` (415896). Provably stale now — safe to remove, with
+the user's OK.
 
-```
-/storage/emulated/0/DCIM/Camera/.pending-1790830549-20220129_131506.heic   412318
-/storage/emulated/0/DCIM/Camera/.pending-1790465830-20190526_124424.heic   415896
-```
+**d. A run cannot pass a consent prompt unattended.** Photo runs suspend on the delete prompt
+every 500, the repair on its "allow changes" prompt, videos every 25. If the screen locks while
+MediaProvider's dialog is up, the dialog is dismissed and **does not re-raise** (`dumpsys` showed
+`PermissionActivity ... isExiting`). Cancel and start again recovers, but a "resume pending
+prompt" affordance would be better.
 
-### 3. State left on the device
+**e. MediaProvider rarely rescans a same-length rewrite.** A rotation-only repair is a 2-byte
+in-place patch; most were not picked up until rescanned explicitly (~4 files/s). That is why the
+repair has a slow "Refreshing the gallery" step. Date fixes grow the file and were mostly picked
+up on close.
 
-A conversion run was **still going** when the session ended (foreground service, survives
-unplugging). Range 2021-09-16 → now, ~11,006 photos. HEIC count was 25,851 and climbing.
-Whatever it reports on completion is the first clean full-run result we've ever had.
+### 4. State left on the device
+
+App settings are **still set for the video test**: range 22 Sep 2021 only, "Delete originals" off.
+The user's own settings (backed up in the session scratchpad as `prefs-before-video-test.xml`):
+`motionPolicy=DROP_VIDEO`, `shrinkOversized=true`, range 2021-09-16 → 2026-09-26, other keys
+default. **Restore before a real run.**
+
+Test output on the phone, beside the originals: 7 `*_HEVC.mp4` files in `DCIM/Camera` from
+4–10 Oct 2021 and 22 Sep 2021 (~127 MB). Keep or delete as the user prefers.
+
+---
+
+## Why converted photos lost their dates (fixed)
+
+`DateTimeOriginal` carries no timezone, so MediaProvider's scanner only records a `DATE_TAKEN`
+when it can infer one, in this order:
+
+1. `OffsetTimeOriginal` (0x9011) in the EXIF;
+2. else a GPS timestamp (`GPSDateStamp` 0x1D + `GPSTimeStamp` 0x07) within 24 h of it;
+3. else the **file's mtime**, if within 24 h;
+4. else it gives up and writes NULL.
+
+A freshly converted file's mtime is *now*, so step 3 fails for any old photo, and one with neither
+a timezone nor a GPS timestamp comes out undated. The originals never hit this because their mtime
+*was* the capture time. Publishing (IS_PENDING=0) triggers that scan, which also overwrites
+whatever `DATE_TAKEN` the app set at insert — and **`DATE_TAKEN` cannot be written directly**
+afterwards (silently ignored). Proven by setting an unmodified failing copy's mtime to its capture
+instant: NULL became the exact right date.
+
+The fix writes `OffsetTimeOriginal` into the EXIF. Where the true instant is known — the original
+JPG's MediaStore date, or a PhotoScan filename, which is epoch milliseconds — the offset is exact;
+otherwise it is **Pacific/Auckland for that date** (the user's instruction).
+
+Ruled out along the way, so nobody re-investigates: the HEIF `iloc` extent (an early check found
+EXIF by raw byte-search, which bypasses `iloc`), IFD sort order, `ImageWidth` in IFD0, GPS
+presence, EXIF size, SubSecTime and thumbnail IFD1. Each was only *correlated* with older camera
+firmware, which wrote none of the timezone tags.
+
+**The same trap applies to video:** MediaMuxer writes the time of writing into `mvhd`, so
+`VideoConverter` copies the original's `mvhd`/`tkhd`/`mdhd` times across afterwards.
+
+## Why converted photos showed sideways in Phone Link (fixed)
+
+Android's decoder and Windows' HEIF codec apply the container rotation (`irot`) and ignore EXIF,
+so thumbnails were right. But MediaStore's `orientation` column comes from **EXIF alone**, and
+anything going by it — Phone Link's full-size view, for one — showed the photo unrotated. Tested
+with copies of one photo: `irot` + EXIF 1 (old output) rotated in Phone Link; `irot` + matching
+EXIF (camera style) correct everywhere; EXIF only with no `irot`, wrong in Windows.
 
 ---
 
@@ -139,7 +193,31 @@ adb usb        # RESTORE THIS AFTERWARDS - otherwise adbd keeps listening on the
 ```
 
 When the device goes `offline`, `adb kill-server; adb start-server` usually recovers it; it
-sometimes takes several cycles.
+sometimes takes several cycles. On a Wi-Fi transport, `adb disconnect <ip>:5555; adb connect
+<ip>:5555` is quicker and does not disturb a USB transport in the same session.
+
+`adb tcpip 5555` needs an existing connection, so re-enabling Wi-Fi ADB after `adb usb` requires
+the cable once (a tiny control command — the faulty cable copes fine), or pairing via
+Developer options → Wireless debugging.
+
+**The phone must be unlocked to drive the app UI.** `am start` will happily launch MainActivity
+*behind* the lock screen, and the screenshot then shows the lock screen while `dumpsys` reports
+the activity focused. Wake with `input keyevent KEYCODE_WAKEUP`, but unlocking needs the user.
+
+### Setting app options without the UI
+
+The app is debuggable, so its prefs can be rewritten directly. base64 avoids all shell-quoting
+pain. Force-stop first, or the running app overwrites the file on exit:
+
+```powershell
+adb shell "am force-stop com.example.convertjpgtoheic"
+adb shell "run-as com.example.convertjpgtoheic sh -c 'echo <BASE64> | base64 -d > /data/data/com.example.convertjpgtoheic/shared_prefs/conversion.xml'"
+```
+
+Keys: `quality`, `deleteOriginals`, `onlyIfSmaller`, `skipSmall`, `shrinkOversized`,
+`skipAlreadyConverted`, `motionPolicy`, `rangeStart`, `rangeEnd` (both epoch ms).
+**Back the file up first and restore it afterwards** — these are the user's real settings.
+`ConversionService` is not exported, so a run still has to be started by tapping Convert.
 
 ## Diagnosing a frozen run
 
