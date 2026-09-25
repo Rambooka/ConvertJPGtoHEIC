@@ -48,9 +48,11 @@ waits while the scanner is still making progress instead of on a fixed clock.
 
 ### 2. Next steps
 
-1. **Video: exercise the delete-then-rename path.** Only tested with "Delete originals" off. With
-   it on, originals go in batches of 25 and each `<name>_HEVC.mp4` is renamed to the original's
-   name afterwards (`convertVideos.flushDeletions`). Untested on the device.
+1. **Video: delete-then-rename is proven.** 6 videos (14–26 Oct 2021, one in `DCIM/Hannah/`):
+   101 MB → 60 MB, originals deleted after the prompt, each `_HEVC` copy renamed to the original's
+   name in the original folder with an identical `datetaken`; confirmed `hvc1` and `©xyz` on disk.
+   Note MediaMuxer writes `moov` at the **start** of the file (the camera puts it at the end), so
+   any future edit that *grows* `moov` must shift every `stco`/`co64` offset.
 2. **Video: a long run**, to see thermal throttling. 540 videos / 18.4 GB; at the measured pace
    roughly 20–40 minutes of encoding.
 3. **Video bitrate** is 55% of the source's (`HEVC_BITRATE_SHARE`), deliberately conservative: the
@@ -94,13 +96,13 @@ up on close.
 
 ### 4. State left on the device
 
-App settings are **still set for the video test**: range 22 Sep 2021 only, "Delete originals" off.
 The user's own settings (backed up in the session scratchpad as `prefs-before-video-test.xml`):
 `motionPolicy=DROP_VIDEO`, `shrinkOversized=true`, range 2021-09-16 → 2026-09-26, other keys
 default. **Restore before a real run.**
 
-Test output on the phone, beside the originals: 7 `*_HEVC.mp4` files in `DCIM/Camera` from
-4–10 Oct 2021 and 22 Sep 2021 (~127 MB). Keep or delete as the user prefers.
+The 7 `*_HEVC.mp4` copies from the keep-originals tests were deleted (originals intact), so
+those videos will be converted normally. App settings are currently range 14–26 Oct 2021 with
+"Delete originals" **on**.
 
 ---
 
