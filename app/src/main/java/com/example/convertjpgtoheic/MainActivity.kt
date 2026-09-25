@@ -102,6 +102,7 @@ class MainActivity : AppCompatActivity() {
         binding.switchDelete.setOnCheckedChangeListener { _, on -> settings.deleteOriginals = on }
         binding.switchOnlySmaller.setOnCheckedChangeListener { _, on -> settings.onlyIfSmaller = on }
         binding.switchSkipSmall.setOnCheckedChangeListener { _, on -> settings.skipSmall = on }
+        binding.switchShrinkOversized.setOnCheckedChangeListener { _, on -> settings.shrinkOversized = on }
         binding.switchSkipExisting.setOnCheckedChangeListener { _, on -> settings.skipAlreadyConverted = on }
         binding.motionPolicyGroup.setOnCheckedChangeListener { _, _ ->
             settings.motionPolicy = selectedMotionPolicy()
@@ -138,6 +139,7 @@ class MainActivity : AppCompatActivity() {
         binding.switchDelete.isChecked = settings.deleteOriginals
         binding.switchOnlySmaller.isChecked = settings.onlyIfSmaller
         binding.switchSkipSmall.isChecked = settings.skipSmall
+        binding.switchShrinkOversized.isChecked = settings.shrinkOversized
         binding.switchSkipExisting.isChecked = settings.skipAlreadyConverted
         checkMotionPolicy(settings.motionPolicy)
         range = settings.range
@@ -350,6 +352,7 @@ class MainActivity : AppCompatActivity() {
         deleteOriginals = binding.switchDelete.isChecked,
         onlyIfSmaller = binding.switchOnlySmaller.isChecked,
         skipSmall = binding.switchSkipSmall.isChecked,
+        shrinkOversized = binding.switchShrinkOversized.isChecked,
         skipAlreadyConverted = binding.switchSkipExisting.isChecked,
         motionPolicy = selectedMotionPolicy(),
     )
@@ -586,6 +589,12 @@ class MainActivity : AppCompatActivity() {
             appendLine("EXIF preserved:    ${report.exifPreserved} of ${report.converted}")
             if (report.exifSynthesised > 0) {
                 appendLine("Date-only EXIF written: ${report.exifSynthesised} (source had none)")
+            }
+            if (report.downscaledToFit > 0) {
+                appendLine(
+                    "Shrunk to fit the encoder: ${report.downscaledToFit} " +
+                        "(too large at full size — saved at reduced resolution)"
+                )
             }
         }
 

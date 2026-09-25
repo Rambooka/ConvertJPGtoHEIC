@@ -27,6 +27,7 @@ Options, remembered between runs:
 
 - **Only keep the HEIC if it is smaller** — discards a result that came out no smaller, rather than trading quality for nothing.
 - **Skip JPGs under 1 MB** (on by default) — passes over photos too small to be worth re-encoding, before they are even decoded. The report counts them and the storage they still occupy.
+- **Shrink oversized photos to fit the encoder** (on by default) — a very large panorama can exceed the GPU's maximum texture size (`HeifWriter` uploads the image as one OpenGL texture), which no amount of memory fixes. When this is on, such an image is downsampled just enough to fit and is converted rather than failed; the report flags it as saved at reduced resolution. It only ever affects images that could not be converted at all otherwise.
 - **Skip photos already converted**
 - **Motion photos** — a three-way choice, defaulting to *Keep the video*:
   - **Keep the video (save as a HEIC motion photo)** — re-encode the still and re-attach the original video, so nothing is lost. Only Samsung SEF motion photos can be carried across this way; a motion photo whose video cannot (a Google/Pixel one, whose video lives in an XMP container `HeifWriter` has no channel for) is skipped rather than silently flattened.

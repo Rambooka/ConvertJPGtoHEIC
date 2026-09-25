@@ -10,6 +10,7 @@
 
     <string name="opt_only_smaller">Only keep the HEIC if it is smaller</string>
     <string name="opt_skip_small">Skip JPGs under 1 MB</string>
+    <string name="opt_shrink_oversized">Shrink oversized photos to fit the encoder</string>
     <string name="opt_skip_existing">Skip photos already converted</string>
 
     <string name="opt_motion_heading">Motion photos</string>

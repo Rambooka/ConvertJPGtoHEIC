@@ -287,6 +287,7 @@ class ConversionService : Service() {
         private const val EXTRA_DELETE = "delete"
         private const val EXTRA_ONLY_SMALLER = "only_smaller"
         private const val EXTRA_SKIP_SMALL = "skip_small"
+        private const val EXTRA_SHRINK_OVERSIZED = "shrink_oversized"
         private const val EXTRA_SKIP_EXISTING = "skip_existing"
         private const val EXTRA_MOTION_POLICY = "motion_policy"
 
@@ -313,6 +314,7 @@ class ConversionService : Service() {
                 .putExtra(EXTRA_DELETE, options.deleteOriginals)
                 .putExtra(EXTRA_ONLY_SMALLER, options.onlyIfSmaller)
                 .putExtra(EXTRA_SKIP_SMALL, options.skipSmall)
+                .putExtra(EXTRA_SHRINK_OVERSIZED, options.shrinkOversized)
                 .putExtra(EXTRA_SKIP_EXISTING, options.skipAlreadyConverted)
                 .putExtra(EXTRA_MOTION_POLICY, options.motionPolicy.name)
             ContextCompat.startForegroundService(context, intent)
@@ -325,6 +327,7 @@ class ConversionService : Service() {
             deleteOriginals = getBooleanExtra(EXTRA_DELETE, false),
             onlyIfSmaller = getBooleanExtra(EXTRA_ONLY_SMALLER, true),
             skipSmall = getBooleanExtra(EXTRA_SKIP_SMALL, true),
+            shrinkOversized = getBooleanExtra(EXTRA_SHRINK_OVERSIZED, true),
             skipAlreadyConverted = getBooleanExtra(EXTRA_SKIP_EXISTING, true),
             motionPolicy = runCatching {
                 MotionPhotoPolicy.valueOf(getStringExtra(EXTRA_MOTION_POLICY) ?: "")

@@ -58,6 +58,8 @@ data class RunOptions(
     val onlyIfSmaller: Boolean,
     /** Pass over JPGs under [MIN_CONVERT_SIZE_BYTES] — too little to gain to be worth re-encoding. */
     val skipSmall: Boolean,
+    /** Shrink an image too large for the encoder (a huge panorama) to fit, rather than failing it. */
+    val shrinkOversized: Boolean,
     val skipAlreadyConverted: Boolean,
     /** What to do with motion photos — skip them, keep the video, or drop it. */
     val motionPolicy: MotionPhotoPolicy,
@@ -145,6 +147,8 @@ data class RunReport(
     /** JPGs skipped for being under the size floor, and the bytes they still take up on disk. */
     val skippedTooSmall: Int = 0,
     val skippedTooSmallBytes: Long = 0,
+    /** Converted, but shrunk to fit the encoder — so the HEIC is lower resolution than the source. */
+    val downscaledToFit: Int = 0,
     /** Sample of failure messages, capped — see [failureCount] for the real total. */
     val failures: List<FailedPhoto> = emptyList(),
     val failureCount: Int = 0,
@@ -647,8 +651,10 @@ class ConversionEngine private constructor(context: Context) {
         motionOutcome: MotionOutcome,
         mirrored: Boolean,
         outputBytes: Long,
+        downscaled: Boolean,
     ): RunReport = tally.copy(
         converted = tally.converted + 1,
+        downscaledToFit = tally.downscaledToFit + if (downscaled) 1 else 0,
         originalBytes = tally.originalBytes + photo.sizeBytes,
         heicBytes = tally.heicBytes + outputBytes,
         // The motion subset of the byte totals; stills fall out as the remainder in the report.
@@ -682,12 +688,14 @@ class ConversionEngine private constructor(context: Context) {
         rotation: Int,
         tally: RunReport,
     ): RunReport {
-        encoder.preflight(photo)?.let {
+        encoder.preflight(photo, options.shrinkOversized)?.let {
             return tally.withFailure(photo, it.reason)
         }
 
         val success = when (
-            val result = encoder.encodeToStaging(photo, forEncoding, options.quality, rotation, trailerStart)
+            val result = encoder.encodeToStaging(
+                photo, forEncoding, options.quality, rotation, options.shrinkOversized, trailerStart,
+            )
         ) {
             is EncodeResult.Failure -> return tally.withFailure(photo, result.reason)
             is EncodeResult.Success -> result
@@ -702,7 +710,9 @@ class ConversionEngine private constructor(context: Context) {
             if (counterpartExists) {
                 return tally.copy(renamedOutput = tally.renamedOutput + 1)
             }
-            return countConverted(tally, photo, metadata, motionOutcome, mirrored, success.bytes)
+            return countConverted(
+                tally, photo, metadata, motionOutcome, mirrored, success.bytes, success.downscaled,
+            )
         } finally {
             success.file?.delete()
         }
@@ -727,15 +737,20 @@ class ConversionEngine private constructor(context: Context) {
         toDelete: MutableList<Uri>,
     ): RunReport {
         // Checked before any row exists, so a photo that was never going to work leaves nothing.
-        encoder.preflight(photo)?.let {
+        encoder.preflight(photo, options.shrinkOversized)?.let {
             return tally.withFailure(photo, it.reason)
         }
 
         var failure: String? = null
         var written = 0L
+        var downscaled = false
 
         val published = repository.publishHeic(photo) { uri ->
-            when (val result = encodeInto(uri, photo, forEncoding, options.quality, rotation, trailerStart)) {
+            when (
+                val result = encodeInto(
+                    uri, photo, forEncoding, options.quality, rotation, options.shrinkOversized, trailerStart,
+                )
+            ) {
                 is EncodeResult.Failure -> {
                     failure = result.reason
                     0L
@@ -743,6 +758,7 @@ class ConversionEngine private constructor(context: Context) {
 
                 is EncodeResult.Success -> {
                     written = result.bytes
+                    downscaled = result.downscaled
                     result.bytes
                 }
             }
@@ -765,7 +781,7 @@ class ConversionEngine private constructor(context: Context) {
         }
 
         toDelete += photo.uri
-        val counted = countConverted(tally, photo, metadata, motionOutcome, mirrored, written)
+        val counted = countConverted(tally, photo, metadata, motionOutcome, mirrored, written, downscaled)
         return if (published.datesApplied) {
             counted
         } else {
@@ -790,12 +806,13 @@ class ConversionEngine private constructor(context: Context) {
         forEncoding: JpegMetadata,
         quality: Int,
         rotation: Int,
+        allowShrink: Boolean,
         trailerStart: Long?,
     ): EncodeResult {
         if (directWriteWorks) {
             val direct = repository.openForWrite(uri)?.use { descriptor ->
                 encoder.encodeToDescriptor(
-                    photo, forEncoding, quality, rotation, descriptor.fileDescriptor, trailerStart,
+                    photo, forEncoding, quality, rotation, descriptor.fileDescriptor, allowShrink, trailerStart,
                 )
             } ?: EncodeResult.Failure("could not open the new file for writing")
 
@@ -810,7 +827,7 @@ class ConversionEngine private constructor(context: Context) {
         }
 
         val staged = when (
-            val result = encoder.encodeToStaging(photo, forEncoding, quality, rotation, trailerStart)
+            val result = encoder.encodeToStaging(photo, forEncoding, quality, rotation, allowShrink, trailerStart)
         ) {
             is EncodeResult.Failure -> return result
             is EncodeResult.Success -> result
@@ -818,7 +835,7 @@ class ConversionEngine private constructor(context: Context) {
         return try {
             val copied = staged.file?.let { copyInto(it, uri) } ?: 0L
             if (copied > 0L) {
-                EncodeResult.Success(copied, staged.width, staged.height)
+                EncodeResult.Success(copied, staged.width, staged.height, downscaled = staged.downscaled)
             } else {
                 EncodeResult.Failure("could not copy the encoded file into the gallery")
             }

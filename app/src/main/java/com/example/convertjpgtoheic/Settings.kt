@@ -31,6 +31,15 @@ class Settings(context: Context) {
         get() = prefs.getBoolean(KEY_SKIP_SMALL, true)
         set(value) = prefs.edit { putBoolean(KEY_SKIP_SMALL, value) }
 
+    /**
+     * Shrink an image too large for the device's encoder (a huge panorama) so it fits, rather than
+     * failing it. Defaults on: it only ever affects images that could not be converted at all
+     * otherwise, and the result is reported as downscaled.
+     */
+    var shrinkOversized: Boolean
+        get() = prefs.getBoolean(KEY_SHRINK_OVERSIZED, true)
+        set(value) = prefs.edit { putBoolean(KEY_SHRINK_OVERSIZED, value) }
+
     var skipAlreadyConverted: Boolean
         get() = prefs.getBoolean(KEY_SKIP_EXISTING, true)
         set(value) = prefs.edit { putBoolean(KEY_SKIP_EXISTING, value) }
@@ -72,6 +81,7 @@ class Settings(context: Context) {
         const val KEY_DELETE = "deleteOriginals"
         const val KEY_ONLY_SMALLER = "onlyIfSmaller"
         const val KEY_SKIP_SMALL = "skipSmall"
+        const val KEY_SHRINK_OVERSIZED = "shrinkOversized"
         const val KEY_SKIP_EXISTING = "skipAlreadyConverted"
         const val KEY_MOTION_POLICY = "motionPolicy"
         const val KEY_RANGE_START = "rangeStart"
