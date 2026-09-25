@@ -7,6 +7,9 @@ import android.graphics.BitmapFactory
 import android.opengl.EGL14
 import android.opengl.EGLConfig
 import android.opengl.GLES20
+import android.os.Handler
+import android.os.HandlerThread
+import android.os.Process
 import android.os.storage.StorageManager
 import android.system.Os
 import android.system.OsConstants
@@ -16,6 +19,8 @@ import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileDescriptor
 import java.io.FileOutputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /** Where the encoder should put the HEIC it produces. */
 sealed interface HeicTarget {
@@ -93,11 +98,14 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
      *
      * Based on the memory actually free on the device, not [ActivityManager.largeMemoryClass]: since
      * Android 8 a bitmap's pixels live in the *native* heap, while largeMemoryClass describes the
-     * Java heap — a pool bitmaps never touch. That figure (512 MB on a 12 GB phone) wrongly refuses
-     * an 88-megapixel panorama the device has gigabytes of room to decode. `availMem` is the real
-     * ceiling; the system's low-memory threshold is held back so a large decode does not trip the
-     * low-memory killer, and the largeMemoryClass is kept as a floor so a briefly busy device still
-     * lets an ordinary photo through.
+     * Java heap — a pool bitmaps never touch. `availMem` is the real ceiling, and the system's
+     * low-memory threshold is held back so a large decode does not trip the low-memory killer.
+     *
+     * The small floor keeps an ordinary photo moving on a briefly busy device. It is deliberately
+     * *not* largeMemoryClass: that is 512 MB here, which waved through a 108-megapixel shot needing
+     * 432 MB on a phone with 387 MB free. The decode itself survived — the encoder then stalled on
+     * the tile grid it implied, with no timeout to end it — so the budget must track real memory
+     * rather than a Java-heap figure that has nothing to do with bitmaps.
      */
     private fun bitmapBudgetBytes(): Long {
         val manager = activityManager
@@ -105,7 +113,7 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
         val info = ActivityManager.MemoryInfo()
         manager.getMemoryInfo(info)
         val available = ((info.availMem - info.threshold) * MEMORY_SAFETY_FRACTION).toLong()
-        val floor = manager.largeMemoryClass.toLong() * 1024 * 1024
+        val floor = FALLBACK_MEMORY_CLASS_MB.toLong() * 1024 * 1024
         return maxOf(floor, available)
     }
 
@@ -340,6 +348,13 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
                     "side). Turn on \"Shrink oversized photos\" to convert it."
             )
         }
+        if (w.toLong() * h > MAX_ENCODE_PIXELS) {
+            return EncodeResult.Failure(
+                "too many pixels for this device's encoder (${w}x$h, " +
+                    "${w.toLong() * h / 1_000_000} MP; limit ${MAX_ENCODE_PIXELS / 1_000_000} MP). " +
+                    "Turn on \"Shrink oversized photos\" to convert it."
+            )
+        }
         val needed = w.toLong() * h * BYTES_PER_PIXEL
         return if (needed > bitmapBudgetBytes()) {
             EncodeResult.Failure(
@@ -383,10 +398,12 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
             if (dimensions != null) {
                 val (w, h) = dimensions
                 val budget = bitmapBudgetBytes()
-                // Grow the step until both the texture limit and the memory budget are satisfied.
+                // Grow the step until the texture limit, the pixel ceiling and the memory
+                // budget are all satisfied.
                 while (
                     w / sampleSize > maxEncodableDimension ||
                     h / sampleSize > maxEncodableDimension ||
+                    (w.toLong() / sampleSize) * (h / sampleSize) > MAX_ENCODE_PIXELS ||
                     (w.toLong() / sampleSize) * (h / sampleSize) * BYTES_PER_PIXEL > budget
                 ) {
                     sampleSize *= 2
@@ -403,6 +420,33 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
             ?.use { BitmapFactory.decodeStream(it, null, options) }
             ?: return null
         return Decoded(bitmap, downscaled = sampleSize > 1)
+    }
+
+    /**
+     * The looper every [HeifWriter] is handed, and the reason this class owns a thread at all.
+     *
+     * Left to itself, `HeifWriter` spins up its own `HeifEncoderThread` — two of them, one in the
+     * writer and one in the encoder — and **never quits either**: `close()` stops the muxer and the
+     * codec and leaves the threads parked on an empty looper forever (androidx.heifwriter 1.1.0).
+     * A bulk run is thousands of encodes, so the process climbs to thousands of live threads and
+     * eventually wedges part-way through, mid-photo.
+     *
+     * Passing a handler in is what stops that: both constructors take the supplied looper and skip
+     * creating a thread. One thread, reused by every encode, quit in [release].
+     *
+     * It must not be the thread that drives the encode — [HeifWriter.stop] blocks until the
+     * encoder's callbacks have run, and those callbacks arrive on this looper.
+     */
+    private var encoderThread: HandlerThread? = null
+
+    /** Started on first use and reused, so a run that never encodes costs no thread at all. */
+    private fun encoderHandler(): Handler {
+        val existing = encoderThread
+        if (existing != null) return Handler(existing.looper)
+        val started = HandlerThread("heic-encode", Process.THREAD_PRIORITY_FOREGROUND)
+        started.start()
+        encoderThread = started
+        return Handler(started.looper)
     }
 
     private fun writeHeif(
@@ -424,6 +468,8 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
                 )
         }
 
+        val handler = encoderHandler()
+
         // Grid mode (on by default) tiles the image for the HEVC encoder, which is what lets a
         // full-resolution phone photo through at all.
         builder
@@ -434,6 +480,8 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
             // Becomes MediaMuxer.setOrientationHint, which is the rotation Android's HEIF
             // decoder actually applies. The EXIF copy has its Orientation zeroed to match.
             .setRotation(rotationDegrees)
+            // One shared looper instead of two fresh threads per photo. See [encoderThread].
+            .setHandler(handler)
             .build()
             .use { writer ->
                 writer.start()
@@ -441,11 +489,39 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
                 writer.addBitmap(bitmap)
                 writer.stop(STOP_TIMEOUT_MS)
             }
+
+        awaitClose(handler)
+    }
+
+    /**
+     * Waits for the close [HeifWriter.close] queued to finish.
+     *
+     * `close()` only *posts* the work that stops and releases the muxer, and `stop()` does not do
+     * it — so when `use` returns, the file's final boxes may not have been written yet. The caller
+     * measures the output immediately afterwards, which would otherwise be a race against a
+     * half-flushed file. The close runs on [encoderThread], so a task queued behind it lands once
+     * it is done.
+     */
+    private fun awaitClose(handler: Handler) {
+        val closed = CountDownLatch(1)
+        handler.post { closed.countDown() }
+        if (!closed.await(STOP_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            Log.w(TAG, "Encoder did not finish closing within ${STOP_TIMEOUT_MS}ms")
+        }
     }
 
     /** Clears anything a crashed or cancelled run left behind. */
     fun clearStaging() {
         runCatching { cacheDir.listFiles()?.forEach { it.delete() } }
+    }
+
+    /**
+     * Gives up the encoding thread. Safe to call more than once, and safe to encode again
+     * afterwards — the thread is created on demand.
+     */
+    fun release() {
+        encoderThread?.quitSafely()
+        encoderThread = null
     }
 
     /** Space this app can obtain on the staging volume, or -1 if it cannot be read. */
@@ -468,6 +544,18 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
         /** GL_MAX_TEXTURE_SIZE floor: the value OpenGL ES 3.0 guarantees, used if the real one
          *  cannot be queried. Every supported GPU meets at least this. */
         private const val SAFE_MAX_TEXTURE = 8192
+
+        /**
+         * Total pixels this will hand the encoder, beyond which the image is shrunk to fit.
+         *
+         * Fitting every side inside GL_MAX_TEXTURE_SIZE is not sufficient: HeifWriter tiles the
+         * image into 512x512 cells, so area — not the longest side — sets how many tiles the HEVC
+         * encoder must chew through. A 12656x3744 panorama (47 MP, 200 tiles) encodes fine here; a
+         * 12000x9000 phone shot (108 MP, 432 tiles) wedges inside `addBitmap` with no timeout to
+         * break it, because both sides sit under a 16384 texture limit. 64 MP sits between the two
+         * and keeps the grid near the size known to work.
+         */
+        private const val MAX_ENCODE_PIXELS = 64_000_000L
 
         /** Headroom required beyond the output itself, so the device is not driven to zero. */
         private const val FREE_SPACE_MARGIN_BYTES = 64L * 1024 * 1024

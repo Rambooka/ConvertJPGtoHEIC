@@ -559,6 +559,8 @@ class ConversionEngine private constructor(context: Context) {
             }
         } finally {
             encoder.clearStaging()
+            // Hands back the encoding thread; the next run starts one on demand.
+            encoder.release()
         }
 
         // Whatever is left over from the last partial chunk.
