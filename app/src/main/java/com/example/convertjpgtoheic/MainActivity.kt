@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.util.Size
 import android.provider.Settings as AndroidSettings
 import android.text.format.Formatter
 import android.view.View
@@ -24,11 +25,17 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.example.convertjpgtoheic.databinding.ActivityMainBinding
 import com.example.convertjpgtoheic.databinding.ItemFailedPhotoBinding
+import com.example.convertjpgtoheic.databinding.ItemUndatedPhotoBinding
 import com.google.android.material.datepicker.MaterialDatePicker
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.DateFormat
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneOffset
 import java.util.Date
 
 class MainActivity : AppCompatActivity() {
@@ -72,6 +79,24 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, getString(R.string.deleted_one, failure.name), Toast.LENGTH_SHORT)
                 .show()
             refreshStorage()
+        }
+    }
+
+    /** An undated photo waiting on the system "allow modify" dialog, with the date to write. */
+    private var pendingManualDate: Triple<UndatedPhoto, LocalDate, ItemUndatedPhotoBinding>? = null
+
+    private val writeAccessLauncher = registerForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        val pending = pendingManualDate
+        pendingManualDate = null
+        if (pending == null) return@registerForActivityResult
+        val (photo, date, row) = pending
+        if (result.resultCode == RESULT_OK) {
+            saveManualDate(photo, date, row, askedForAccess = true)
+        } else {
+            showUndatedDetail(photo, row)
+            Toast.makeText(this, R.string.undated_access_declined, Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -626,6 +651,7 @@ class MainActivity : AppCompatActivity() {
                 binding.statusText.text = ""
                 binding.resultText.text = describe(state.report)
                 showFailures(state.report)
+                showUndated(state.report)
                 // A finished run changes the picture, sometimes a lot.
                 refreshStorage()
             }
@@ -854,7 +880,128 @@ class MainActivity : AppCompatActivity() {
     private fun clearFailures() {
         binding.failuresList.removeAllViews()
         binding.failuresHeading.isVisible(false)
+        binding.undatedList.removeAllViews()
+        binding.undatedHeading.isVisible(false)
     }
+
+    // region undated photos
+
+    /**
+     * Lists the photos a repair found no date for — flatbed scans and the like — each with a
+     * thumbnail and a way to look at it and give it a date by hand.
+     */
+    private fun showUndated(report: RunReport) {
+        binding.undatedList.removeAllViews()
+        val photos = report.undated
+        binding.undatedHeading.isVisible(photos.isNotEmpty())
+        if (photos.isEmpty()) return
+
+        binding.undatedHeading.text = if (report.repairNoDateSource > photos.size) {
+            getString(R.string.undated_heading_capped, report.repairNoDateSource, photos.size)
+        } else {
+            getString(R.string.undated_heading, photos.size)
+        }
+        for (photo in photos) {
+            val row = ItemUndatedPhotoBinding.inflate(layoutInflater, binding.undatedList, false)
+            row.undatedName.text = photo.name
+            showUndatedDetail(photo, row)
+            row.undatedViewButton.setOnClickListener { viewUri(photo.uri, PhotoRepository.HEIC_MIME) }
+            row.undatedSetDateButton.setOnClickListener { pickDate(photo, row) }
+            binding.undatedList.addView(row.root)
+            loadThumbnail(photo, row)
+        }
+    }
+
+    private fun showUndatedDetail(photo: UndatedPhoto, row: ItemUndatedPhotoBinding) {
+        val dated = engine.manualDate(photo.uri)
+        row.undatedDetail.text = if (dated != null) {
+            getString(R.string.undated_dated, dateFormat.format(Date(dated)))
+        } else {
+            listOfNotNull(photo.folder, formatSize(photo.sizeBytes)).joinToString(" · ")
+        }
+        row.undatedSetDateButton.setText(if (dated != null) R.string.action_change_date else R.string.action_set_date)
+        row.undatedSetDateButton.isEnabled = true
+    }
+
+    private fun loadThumbnail(photo: UndatedPhoto, row: ItemUndatedPhotoBinding) {
+        lifecycleScope.launch {
+            val size = (72 * resources.displayMetrics.density).toInt()
+            val bitmap = withContext(Dispatchers.IO) {
+                try {
+                    contentResolver.loadThumbnail(photo.uri, Size(size, size), null)
+                } catch (e: Exception) {
+                    Log.w(TAG, "No thumbnail for ${photo.name}", e)
+                    null
+                }
+            }
+            if (bitmap != null) row.undatedThumb.setImageBitmap(bitmap)
+        }
+    }
+
+    /**
+     * Asks for the date. Typed entry is the default: a scan from decades ago is far quicker to type
+     * than to reach by paging a calendar, and the calendar is one tap away.
+     */
+    private fun pickDate(photo: UndatedPhoto, row: ItemUndatedPhotoBinding) {
+        val picker = MaterialDatePicker.Builder.datePicker()
+            .setTitleText(R.string.undated_pick_title)
+            .setInputMode(MaterialDatePicker.INPUT_MODE_TEXT)
+            .apply {
+                // The picker works in midnight-UTC days; the stored date is midday at home.
+                engine.manualDate(photo.uri)?.let { ms ->
+                    val day = Instant.ofEpochMilli(ms).atZone(ExifEditor.HOME_ZONE).toLocalDate()
+                    setSelection(day.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli())
+                }
+            }
+            .build()
+        picker.addOnPositiveButtonClickListener { selection ->
+            // The picker hands back midnight UTC of the chosen day.
+            val date = Instant.ofEpochMilli(selection).atZone(ZoneOffset.UTC).toLocalDate()
+            saveManualDate(photo, date, row, askedForAccess = false)
+        }
+        picker.show(supportFragmentManager, "undated-date")
+    }
+
+    private fun saveManualDate(photo: UndatedPhoto, date: LocalDate, row: ItemUndatedPhotoBinding, askedForAccess: Boolean) {
+        row.undatedDetail.setText(R.string.undated_saving)
+        row.undatedSetDateButton.isEnabled = false
+        lifecycleScope.launch {
+            when (val result = withContext(Dispatchers.IO) { engine.setCaptureDate(photo, date) }) {
+                is ManualDateResult.Done -> {
+                    showUndatedDetail(photo, row)
+                    if (result.dateTakenMs == null) {
+                        val shown = Date.from(date.atTime(12, 0).atZone(ExifEditor.HOME_ZONE).toInstant())
+                        row.undatedDetail.text = getString(R.string.undated_dated_pending, dateFormat.format(shown))
+                    }
+                }
+                ManualDateResult.NeedsAccess -> if (askedForAccess) {
+                    showUndatedDetail(photo, row)
+                    Toast.makeText(this@MainActivity, R.string.undated_access_declined, Toast.LENGTH_SHORT).show()
+                } else {
+                    requestWriteAccess(photo, date, row)
+                }
+                is ManualDateResult.Failed -> {
+                    showUndatedDetail(photo, row)
+                    Toast.makeText(this@MainActivity, getString(R.string.undated_failed, result.reason), Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    /** The app no longer owns this file (it was reinstalled, say), so the user must allow the edit. */
+    private fun requestWriteAccess(photo: UndatedPhoto, date: LocalDate, row: ItemUndatedPhotoBinding) {
+        try {
+            val sender = engine.createWriteIntentSender(listOf(photo.uri))
+            pendingManualDate = Triple(photo, date, row)
+            writeAccessLauncher.launch(IntentSenderRequest.Builder(sender).build())
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not ask to modify ${photo.uri}", e)
+            showUndatedDetail(photo, row)
+            Toast.makeText(this, R.string.undated_access_declined, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // endregion
 
     /**
      * Fills the interactive failed-photo list: one row per photo that could not be converted, each
@@ -879,14 +1026,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun viewPhoto(failure: FailedPhoto) {
+    private fun viewPhoto(failure: FailedPhoto) = viewUri(failure.uri, "image/jpeg")
+
+    private fun viewUri(uri: Uri, mimeType: String) {
         val intent = Intent(Intent.ACTION_VIEW)
-            .setDataAndType(failure.uri, "image/jpeg")
+            .setDataAndType(uri, mimeType)
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         try {
             startActivity(intent)
         } catch (e: Exception) {
-            Log.w(TAG, "No viewer for ${failure.uri}", e)
+            Log.w(TAG, "No viewer for $uri", e)
             Toast.makeText(this, R.string.view_failed, Toast.LENGTH_SHORT).show()
         }
     }

@@ -40,6 +40,18 @@
     <string name="view_failed">Couldn\'t open that photo.</string>
     <string name="deleted_one">Deleted %1$s.</string>
 
+    <string name="action_set_date">Set date</string>
+    <string name="action_change_date">Change date</string>
+    <string name="undated_heading">%1$d with no date anywhere — set one by hand</string>
+    <string name="undated_heading_capped">%1$d with no date anywhere — the first %2$d are listed</string>
+    <string name="undated_thumb_description">Photo preview</string>
+    <string name="undated_pick_title">When was this taken?</string>
+    <string name="undated_saving">Saving…</string>
+    <string name="undated_dated">Dated %1$s</string>
+    <string name="undated_dated_pending">Dated %1$s — the gallery will catch up shortly</string>
+    <string name="undated_failed">Couldn\'t set the date: %1$s</string>
+    <string name="undated_access_declined">Not allowed to change that photo.</string>
+
     <string name="permission_needed">This app needs full access to your photos. Tap to grant it.</string>
     <string name="permission_partial">Only selected photos are shared with this app, so a date
         range cannot be scanned. Tap to allow access to all photos.</string>

@@ -689,6 +689,33 @@ class PhotoRepository(private val context: Context) {
         return out
     }
 
+    /**
+     * Modified times of the JPGs still in the library, dated or not, keyed by [nameKey] — where the
+     * gallery placed each original. The last resort for a HEIC with no capture time anywhere: it
+     * goes back to where its original sat rather than staying on the day it was converted.
+     * Names whose JPGs disagree are dropped.
+     */
+    fun jpgModifiedTimesByName(): Map<String, Long> {
+        val out = HashMap<String, Long>()
+        val ambiguous = HashSet<String>()
+        resolver.query(
+            collection,
+            arrayOf(MediaStore.Images.Media.DISPLAY_NAME, MediaStore.Images.Media.DATE_MODIFIED),
+            "${MediaStore.Images.Media.MIME_TYPE} IN (?, ?) AND ${MediaStore.Images.Media.DATE_MODIFIED} > 0",
+            arrayOf("image/jpeg", "image/jpg"),
+            null,
+        )?.use { c ->
+            while (c.moveToNext()) {
+                val key = nameKey(c.getString(0) ?: continue)
+                val modified = c.getLong(1) * 1000
+                val previous = out.put(key, modified)
+                if (previous != null && kotlin.math.abs(previous - modified) > DATE_MATCH_TOLERANCE_MS) ambiguous += key
+            }
+        }
+        ambiguous.forEach { out.remove(it) }
+        return out
+    }
+
     /** MediaStore's current date and orientation for each of [ids]. */
     fun captureStates(ids: Collection<Long>): Map<Long, CaptureState> {
         val out = HashMap<Long, CaptureState>()
@@ -749,6 +776,28 @@ class PhotoRepository(private val context: Context) {
 
         /** Matches a HEIC to the JPG it came from, whichever folder either ended up in. */
         fun nameKey(displayName: String): String = PhotoNaming.baseName(displayName).lowercase()
+
+        /**
+         * [jpgTimes] plus, for names no JPG dates, the date of a *dated* HEIC of the same name.
+         *
+         * Early builds could write a HEIC with no EXIF at all, and the same photo was often
+         * converted again later — correctly — into another folder. The dated twin is the same
+         * picture, so its date is the right one for the undated copy. As with JPGs, a name whose
+         * dated HEICs disagree is dropped rather than guessed between.
+         */
+        fun withTwinTimes(jpgTimes: Map<String, Long>, heics: List<Pair<String, Long?>>): Map<String, Long> {
+            val twins = HashMap<String, Long>()
+            val ambiguous = HashSet<String>()
+            for ((name, taken) in heics) {
+                if (taken == null || taken <= 0) continue
+                val key = nameKey(name)
+                if (key in jpgTimes) continue
+                val previous = twins.put(key, taken)
+                if (previous != null && kotlin.math.abs(previous - taken) > DATE_MATCH_TOLERANCE_MS) ambiguous += key
+            }
+            ambiguous.forEach { twins.remove(it) }
+            return jpgTimes + twins
+        }
 
         private const val QUERY_CHUNK = 500
         private const val COPY_BUFFER = 1024 * 1024

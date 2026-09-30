@@ -79,6 +79,13 @@ object ExifEditor {
         val hasExifIfd: Boolean,
     )
 
+    /** A block with an empty IFD0, for a file that has no EXIF at all: [edit] adds the tags. */
+    fun empty(): ByteArray = "Exif\u0000\u0000".toByteArray(Charsets.ISO_8859_1) + byteArrayOf(
+        0x4D, 0x4D, 0x00, 0x2A, 0x00, 0x00, 0x00, 0x08, // big-endian TIFF, IFD0 at 8
+        0x00, 0x00, // no entries
+        0x00, 0x00, 0x00, 0x00, // no IFD1
+    )
+
     /** Reads the block, or returns null when it is not a well-formed EXIF block. */
     fun summarise(block: ByteArray): Summary? {
         val tiff = Tiff.of(block) ?: return null
@@ -115,12 +122,16 @@ object ExifEditor {
      *   none. An existing value is never overwritten.
      * @param offset timezone to add as `OffsetTimeOriginal` (plus `OffsetTime` and
      *   `OffsetTimeDigitized`) where each is missing. Existing offsets are never overwritten.
+     * @param replaceDate the date is one the user chose, so an existing `DateTimeOriginal` and
+     *   offsets (a camera's "0000:00:00 00:00:00", say) are overwritten in place. Null if one
+     *   cannot be, because it is not the standard length.
      */
     fun edit(
         block: ByteArray,
         orientation: Int? = null,
         dateTimeOriginal: String? = null,
         offset: ZoneOffset? = null,
+        replaceDate: Boolean = false,
     ): ByteArray? {
         val tiff = Tiff.of(block) ?: return null
         val ifd0Offset = tiff.ifd0Offset()
@@ -143,14 +154,22 @@ object ExifEditor {
         val exifIfdEntry = ifd0.find(TAG_EXIF_IFD)
         val exifIfd = exifIfdEntry?.let { tiff.readIfd(tiff.valueLong(it)) ?: return null }
         val exifAdditions = mutableListOf<NewEntry>()
-        if (dateTimeOriginal != null && exifIfd?.find(TAG_DATE_TIME_ORIGINAL) == null) {
+        if (dateTimeOriginal != null) {
             if (parseExifDate(dateTimeOriginal) == null) return null
-            exifAdditions += NewEntry.ascii(TAG_DATE_TIME_ORIGINAL, dateTimeOriginal)
+            val existing = exifIfd?.find(TAG_DATE_TIME_ORIGINAL)
+            when {
+                existing == null -> exifAdditions += NewEntry.ascii(TAG_DATE_TIME_ORIGINAL, dateTimeOriginal)
+                replaceDate -> if (!overwriteAscii(out, tiff, existing, dateTimeOriginal)) return null
+            }
         }
         if (offset != null) {
             val text = formatOffset(offset)
             for (tag in listOf(TAG_OFFSET_TIME, TAG_OFFSET_TIME_ORIGINAL, TAG_OFFSET_TIME_DIGITIZED)) {
-                if (exifIfd?.find(tag) == null) exifAdditions += NewEntry.ascii(tag, text)
+                val existing = exifIfd?.find(tag)
+                when {
+                    existing == null -> exifAdditions += NewEntry.ascii(tag, text)
+                    replaceDate -> if (!overwriteAscii(out, tiff, existing, text)) return null
+                }
             }
         }
 
@@ -205,6 +224,8 @@ object ExifEditor {
     fun formatExifDate(utcMs: Long, zone: ZoneId = HOME_ZONE): String =
         EXIF_FORMAT.format(Instant.ofEpochMilli(utcMs).atZone(zone).toLocalDateTime())
 
+    fun formatExifDate(local: LocalDateTime): String = EXIF_FORMAT.format(local)
+
     fun parseExifDate(value: String): LocalDateTime? {
         val text = value.trim().trimEnd('\u0000')
         if (text.length < 19) return null
@@ -249,6 +270,16 @@ object ExifEditor {
                 return NewEntry(tag, TYPE_ASCII, bytes.size.toLong(), bytes, 0)
             }
         }
+    }
+
+    /** Rewrites an ASCII value of exactly [text]'s length plus terminator where it lies. */
+    private fun overwriteAscii(out: Growable, tiff: Tiff, entry: Entry, text: String): Boolean {
+        val bytes = text.toByteArray(Charsets.US_ASCII) + 0.toByte()
+        if (entry.type != TYPE_ASCII || entry.count != bytes.size.toLong()) return false
+        val at = if (bytes.size <= 4) entry.valueFieldOffset else tiff.valueLong(entry).toInt()
+        if (at < 0 || TIFF_START + at + bytes.size > tiff.block.size) return false
+        out.putBytes(TIFF_START + at, bytes)
+        return true
     }
 
     /**
@@ -332,7 +363,8 @@ object ExifEditor {
             if (offset < 8 || offset + 2 > length) return null
             val start = offset.toInt()
             val count = u16(start) ?: return null
-            if (count <= 0 || count > 1000) return null
+            // Zero entries is legal, and some editors leave an empty Exif sub-IFD behind.
+            if (count > 1000) return null
             if (start + 2 + count * ENTRY_SIZE + 4 > length) return null
             val entries = (0 until count).map { i ->
                 val at = start + 2 + i * ENTRY_SIZE
@@ -391,6 +423,7 @@ object ExifEditor {
             if ((size - TIFF_START) % 2 != 0) append(byteArrayOf(0))
         }
 
+        fun putBytes(at: Int, data: ByteArray) = data.copyInto(bytes, at)
         fun putU16(at: Int, value: Int, le: Boolean) = writeU16(bytes, at, value, le)
         fun putU32(at: Int, value: Long, le: Boolean) = writeU32(bytes, at, value, le)
 

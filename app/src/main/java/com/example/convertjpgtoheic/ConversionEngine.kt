@@ -2,6 +2,7 @@ package com.example.convertjpgtoheic
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.ContentUris
 import android.content.Context
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -140,6 +141,31 @@ data class FailedPhoto(
     val hasFile: Boolean get() = uri != Uri.EMPTY
 }
 
+/**
+ * A HEIC the repair could find no capture time for — a flatbed scan copied onto the phone, say —
+ * listed in the report so the user can look at it and give it a date by hand.
+ */
+data class UndatedPhoto(
+    val uri: Uri,
+    val name: String,
+    val sizeBytes: Long,
+    /** Filesystem path, so the scanner can be asked to re-read it once dated. */
+    val path: String?,
+) {
+    /** The folder it is in, as the user sees it (`DCIM/Scans`). */
+    val folder: String?
+        get() = path?.substringBeforeLast('/', "")?.substringAfter("/emulated/0/")?.takeIf { it.isNotEmpty() }
+}
+
+/** How setting a date by hand went. */
+sealed interface ManualDateResult {
+    /** Written; [dateTakenMs] is what the gallery now reports, null if it has not caught up yet. */
+    data class Done(val dateTakenMs: Long?) : ManualDateResult
+    /** The app may not write this file until the user allows it. */
+    data object NeedsAccess : ManualDateResult
+    data class Failed(val reason: String) : ManualDateResult
+}
+
 data class RunReport(
     val mode: RunMode,
     val cancelled: Boolean = false,
@@ -196,6 +222,8 @@ data class RunReport(
     val repairDeclined: Int = 0,
     /** Undated, with no capture time anywhere to recover — not in EXIF, not in the name. */
     val repairNoDateSource: Int = 0,
+    /** Those photos, for the report to list with a way to date them by hand (capped). */
+    val undated: List<UndatedPhoto> = emptyList(),
     /** Rewritten, but MediaStore still reports the old values after a rescan. */
     val repairUnverified: Int = 0,
     /** Video runs only: left alone because re-encoding would lose a camera mode (slow motion...). */
@@ -263,6 +291,9 @@ data class RunReport(
 }
 
 private const val MAX_RETAINED_FAILURES = 50
+
+/** Undated photos listed in a repair report; each is a row with a thumbnail, so keep it sane. */
+private const val MAX_LISTED_UNDATED = 300
 
 enum class DeletionOutcome { NOT_REQUESTED, PENDING, COMPLETED, DECLINED }
 
@@ -978,14 +1009,23 @@ class ConversionEngine private constructor(context: Context) {
      * The zone is exact whenever the true instant is known (a PhotoScan filename, or the
      * original's MediaStore date) and [ExifEditor.HOME_ZONE] otherwise. A GPS timestamp is left to
      * speak for itself rather than be contradicted by an assumed zone.
+     *
+     * With no date in the EXIF at all, a dated filename (`20191221_081314.jpg`) supplies one, and
+     * failing that the original's gallery date (its DATE_TAKEN, else its modified time) — so the
+     * HEIC sits where the JPG did rather than on the day it was converted.
      */
     private fun anchorCaptureTime(block: ByteArray, photo: SourcePhoto): ByteArray {
         val exif = ExifEditor.summarise(block) ?: return block
-        val wallClock = exif.dateTimeOriginal ?: exif.fallbackDateTime ?: return block
+        val fileName = FileNameTime.of(photo.displayName)
+        val named = (fileName as? FileNameTime.Instant)?.utcMs
+        val wallClock = exif.dateTimeOriginal ?: exif.fallbackDateTime
+            ?: named?.let { ExifEditor.formatExifDate(it) }
+            ?: (fileName as? FileNameTime.Local)?.exifDateTime
+            ?: photo.dateTakenMs.takeIf { it > 0 }?.let { ExifEditor.formatExifDate(it) }
+            ?: return block
         val local = ExifEditor.parseExifDate(wallClock) ?: return block
         val addOriginal = if (exif.dateTimeOriginal == null) wallClock else null
 
-        val named = (FileNameTime.of(photo.displayName) as? FileNameTime.Instant)?.utcMs
         val offset = if (exif.hasOffsetTimeOriginal) {
             null
         } else {
@@ -1166,7 +1206,11 @@ class ConversionEngine private constructor(context: Context) {
             _state.value = UiState.Finished(RunReport(mode))
             return
         }
-        val knownTimes = repository.jpgCaptureTimesByName()
+        val knownTimes = PhotoRepository.withTwinTimes(
+            repository.jpgCaptureTimesByName(),
+            rows.map { it.displayName to it.dateTakenMs },
+        )
+        val originalsModified = repository.jpgModifiedTimesByName()
 
         var tally = RunReport(mode)
         val repaired = ArrayList<Pair<HeicRow, HeicRepair.Fix>>()
@@ -1208,15 +1252,22 @@ class ConversionEngine private constructor(context: Context) {
             if (cancelRequested) break
             if (index % REPAIR_PROGRESS_EVERY == 0) progress(RepairPhase.CHECKING, index, rows.size, row.displayName, checking)
             val undated = (row.dateTakenMs ?: 0L) <= 0L
-            val known = knownTimes[PhotoRepository.nameKey(row.displayName)]
-            when (val diagnosis = repairer.diagnose(row.uri, row.displayName, undated, known)) {
+            val key = PhotoRepository.nameKey(row.displayName)
+            val known = knownTimes[key]
+            when (val diagnosis = repairer.diagnose(row.uri, row.displayName, undated, known, originalsModified[key])) {
                 HeicRepair.Diagnosis.Fine -> Unit
                 is HeicRepair.Diagnosis.Cannot -> when {
                     // A dated HEIC that cannot be parsed is most likely a camera original needing
                     // nothing; only an undated one is a photo actually left broken.
                     !undated -> Unit
-                    diagnosis.reason.startsWith("no capture time") ->
-                        tally = tally.copy(repairNoDateSource = tally.repairNoDateSource + 1)
+                    diagnosis.reason.startsWith("no capture time") -> tally = tally.copy(
+                        repairNoDateSource = tally.repairNoDateSource + 1,
+                        undated = if (tally.undated.size < MAX_LISTED_UNDATED) {
+                            tally.undated + UndatedPhoto(row.uri, row.displayName, row.sizeBytes, row.path)
+                        } else {
+                            tally.undated
+                        },
+                    )
                     else -> tally = tally.withFailure(row.uri, row.displayName, row.sizeBytes, diagnosis.reason)
                 }
                 is HeicRepair.Diagnosis.Needs -> try {
@@ -1363,6 +1414,37 @@ class ConversionEngine private constructor(context: Context) {
 
     fun createDeleteIntentSender(uris: List<Uri>) =
         MediaStore.createDeleteRequest(app.contentResolver, uris).intentSender
+
+    /** The system "allow this app to modify" dialog for photos the app no longer owns. */
+    fun createWriteIntentSender(uris: List<Uri>) =
+        MediaStore.createWriteRequest(app.contentResolver, uris).intentSender
+
+    /** Photos dated by hand since the report was made: uri → what the gallery now reports. */
+    private val manualDates = java.util.concurrent.ConcurrentHashMap<Uri, Long>()
+
+    fun manualDate(uri: Uri): Long? = manualDates[uri]
+
+    /**
+     * Gives [photo] the capture date the user picked, at midday in [ExifEditor.HOME_ZONE] — the
+     * same treatment as a filename that carries a date but no time. Blocking I/O: call it off the
+     * main thread.
+     */
+    fun setCaptureDate(photo: UndatedPhoto, date: java.time.LocalDate): ManualDateResult {
+        val wallClock = ExifEditor.formatExifDate(date.atTime(12, 0))
+        val outcome = try {
+            repairer.setDate(photo.uri, photo.name, wallClock)
+        } catch (_: SecurityException) {
+            return ManualDateResult.NeedsAccess
+        }
+        if (outcome is HeicRepair.Outcome.Failed) return ManualDateResult.Failed(outcome.reason)
+
+        // A rewrite in place is not always noticed, so ask the scanner to read it again.
+        photo.path?.let { repository.scanFiles(listOf(it)) }
+        val id = ContentUris.parseId(photo.uri)
+        val taken = repository.captureStates(listOf(id))[id]?.dateTakenMs
+        if (taken != null) manualDates[photo.uri] = taken
+        return ManualDateResult.Done(taken)
+    }
 
     /** The system dialog for [request] — delete, or allow the app to modify. */
     fun createConsentIntentSender(request: DeletionRequest) = when (request.kind) {

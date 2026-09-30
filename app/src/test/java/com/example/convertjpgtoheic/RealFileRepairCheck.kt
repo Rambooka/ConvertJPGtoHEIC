@@ -32,6 +32,23 @@ class RealFileRepairCheck {
             println("${file.name}: $diagnosis")
             val fix = (diagnosis as? HeicRepair.Diagnosis.Needs)?.fix ?: continue
 
+            if (fix.createsExif) {
+                val bare = HeifExif.locateBare(src)!!
+                val block = ExifEditor.edit(ExifEditor.empty(), fix.orientation, fix.dateTimeOriginal, fix.offset)!!
+                val plan = HeifExif.planInsert(src, bare, HeifExif.newItem(block))!!
+                // Staged: before the pointer writes the file must still read exactly as it did.
+                val staged = MetadataTestData.applied(original, plan.dataWrites)
+                assertTrue("${file.name} changed before its pointers moved",
+                    HeifExif.locate(ByteArraySource(staged)) == null && staged.copyOf(original.size).contentEquals(original))
+                val repaired = MetadataTestData.applied(staged, plan.pointerWrites)
+                assertTrue("${file.name} did not verify", HeifExif.verifyInsert(ByteArraySource(repaired), bare, plan, null))
+                val s = ExifEditor.summarise(HeifExif.splitItem(repaired.copyOfRange(
+                    plan.newItemOffset.toInt(), (plan.newItemOffset + plan.newItem.size).toInt()))!!.second)!!
+                println("  -> ${s.dateTimeOriginal}, offset=${s.hasOffsetTimeOriginal}, orientation=${s.orientation}")
+                File(out, file.name).writeBytes(repaired)
+                continue
+            }
+
             val layout = HeifExif.locate(src)!!
             val item = original.copyOfRange(layout.exifItemOffset.toInt(), (layout.exifItemOffset + layout.exifItemLength).toInt())
             val (head, block) = HeifExif.splitItem(item)!!

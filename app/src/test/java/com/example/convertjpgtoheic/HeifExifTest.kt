@@ -152,4 +152,71 @@ class HeifExifTest {
         val (head, block) = HeifExif.splitItem(item)!!
         return HeifExif.joinItem(head, change(block))
     }
+
+    // region adding an Exif item
+
+    private fun dated() = ExifEditor.edit(
+        ExifEditor.empty(), orientation = 6, dateTimeOriginal = "2024:11:26 12:00:00", offset = ZoneOffset.ofHours(13),
+    )!!
+
+    @Test
+    fun `adds an Exif item to a HEIF that has none, leaving the image alone`() {
+        val heif = MetadataTestData.heif(ByteArray(0), rotationCcw = 270, withExif = false)
+        val src = ByteArraySource(heif.bytes)
+        assertNull(HeifExif.locate(src))
+        val bare = HeifExif.locateBare(src)!!
+        assertEquals(270, bare.rotationCcw)
+
+        val plan = HeifExif.planInsert(src, bare, HeifExif.newItem(dated()))!!
+        // Staged but not yet pointed at: the file still reads as it did.
+        val staged = MetadataTestData.applied(heif.bytes, plan.dataWrites)
+        assertArrayEquals(heif.bytes, staged.copyOf(heif.bytes.size))
+        assertNull(HeifExif.locate(ByteArraySource(staged))) // the staged copy is still typed free
+
+        val done = MetadataTestData.applied(staged, plan.pointerWrites)
+        assertTrue(HeifExif.verifyInsert(ByteArraySource(done), bare, plan, null))
+        val layout = HeifExif.locate(ByteArraySource(done))!!
+        assertEquals(270, layout.rotationCcw)
+        val block = HeifExif.splitItem(done.copyOfRange(layout.exifItemOffset.toInt(), (layout.exifItemOffset + layout.exifItemLength).toInt()))!!.second
+        val s = ExifEditor.summarise(block)!!
+        assertEquals("2024:11:26 12:00:00", s.dateTimeOriginal)
+        assertTrue(s.hasOffsetTimeOriginal)
+        assertEquals(6, s.orientation)
+        assertArrayEquals(
+            heif.bytes.copyOfRange(heif.imageOffset, heif.imageOffset + heif.imageLength),
+            done.copyOfRange(heif.imageOffset, heif.imageOffset + heif.imageLength),
+        )
+    }
+
+    @Test
+    fun `adding an Exif item keeps a trailer at the end and can be undone`() {
+        val trailer = ByteArray(64) { (it + 1).toByte() }
+        val heif = MetadataTestData.heif(ByteArray(0), withExif = false, trailer = trailer)
+        val metaEnd = (heif.bytes.size - trailer.size).toLong()
+        val src = ByteArraySource(heif.bytes)
+        val bare = HeifExif.locateBare(src, metaEnd)!!
+        val plan = HeifExif.planInsert(src, bare, HeifExif.newItem(dated()))!!
+
+        val done = MetadataTestData.applied(heif.bytes, plan.dataWrites + plan.pointerWrites)
+        assertArrayEquals(trailer, done.copyOfRange(done.size - trailer.size, done.size))
+        val trailerStart = (done.size - trailer.size).toLong()
+        assertTrue(HeifExif.verifyInsert(ByteArraySource(done), bare, plan, trailerStart))
+
+        val undone = MetadataTestData.applied(done, plan.undoWrites, truncateTo = plan.oldLength)
+        assertArrayEquals(heif.bytes, undone)
+    }
+
+    @Test
+    fun `will not add a second Exif item`() {
+        val heif = MetadataTestData.heif(MetadataTestData.samsungLikeExif(1, "2017:07:28 08:20:28"))
+        assertNull(HeifExif.locateBare(ByteArraySource(heif.bytes)))
+    }
+
+    @Test
+    fun `will not add an Exif item when image data sits after meta`() {
+        val heif = MetadataTestData.heif(ByteArray(0), withExif = false, imageExtentPastEnd = true)
+        assertNull(HeifExif.locateBare(ByteArraySource(heif.bytes)))
+    }
+
+    // endregion
 }

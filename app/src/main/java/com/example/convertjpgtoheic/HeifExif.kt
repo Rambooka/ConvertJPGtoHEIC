@@ -36,6 +36,16 @@ class HeifExifLayout internal constructor(
     internal val otherDataEnd: Long,
 )
 
+/** A HEIF with no Exif item, laid out so that one can be added. */
+class HeifBareLayout internal constructor(
+    internal val parsed: HeifExif.Parsed,
+    /** The furthest byte any item's data reaches. */
+    internal val otherDataEnd: Long,
+) {
+    val rotationCcw: Int get() = parsed.rotationCcw
+    val mirrored: Boolean get() = parsed.mirrored
+}
+
 /**
  * The writes that replace a HEIF's Exif item, and the writes that undo them.
  *
@@ -97,6 +107,209 @@ object HeifExif {
      * @param trailerStart when known, where a trailer begins; box scanning never goes past it.
      */
     fun locate(src: ByteSource, trailerStart: Long? = null): HeifExifLayout? {
+        val p = parse(src, trailerStart) ?: return null
+        val m = p.meta
+
+        val exifIds = p.types.filterValues { it == "Exif" }.keys
+        if (exifIds.size != 1) return null
+        val exifId = exifIds.first()
+
+        val iloc = p.iloc
+        val exif = iloc.items[exifId] ?: return null
+        if (exif.constructionMethod != 0 || exif.dataReference != 0 || exif.extents.size != 1) return null
+        if (iloc.offsetSize == 0 || iloc.lengthSize == 0) return null
+        val extent = exif.extents.single()
+        val itemOffset = exif.baseOffset + extent.offset
+        if (extent.length <= 0 || extent.length > MAX_ITEM_BYTES || itemOffset + extent.length > src.size) return null
+
+        return HeifExifLayout(
+            heifEnd = p.heifEnd,
+            exifItemOffset = itemOffset,
+            exifItemLength = extent.length.toInt(),
+            rotationCcw = p.rotationCcw,
+            mirrored = p.mirrored,
+            offsetField = p.metaBox.start + extent.offsetField,
+            offsetFieldSize = iloc.offsetSize,
+            lengthField = p.metaBox.start + extent.lengthField,
+            lengthFieldSize = iloc.lengthSize,
+            baseOffset = exif.baseOffset,
+            otherDataEnd = otherDataEnd(iloc, except = exifId),
+        )
+    }
+
+    /**
+     * Reads a HEIF that has **no** Exif item, or returns null when it has one or one cannot be
+     * added safely — see [planInsert] for what "safely" requires.
+     */
+    fun locateBare(src: ByteSource, trailerStart: Long? = null): HeifBareLayout? {
+        val p = parse(src, trailerStart) ?: return null
+        if (p.types.values.any { it == "Exif" }) return null
+        // The meta box is rewritten larger, so it must be the last box: nothing may move.
+        if (p.metaBox.start + p.metaBox.size != p.heifEnd) return null
+        // Every byte of the body must be accounted for by child boxes, or the rebuild could drop some.
+        val c = p.children
+        if ((c.lastOrNull()?.end ?: -1) != p.meta.size) return null
+        if (c.count { it.type == "iinf" } != 1 || c.count { it.type == "iloc" } != 1 || c.count { it.type == "iref" } > 1) return null
+        val otherEnd = otherDataEnd(p.iloc, except = null)
+        if (otherEnd > p.metaBox.start) return null
+        if (p.iloc.offsetSize == 0 || p.iloc.lengthSize == 0) return null
+        return HeifBareLayout(p, otherEnd)
+    }
+
+    /**
+     * Builds the writes that give a bare HEIF [newItem] as its Exif item, or null if that is not
+     * safe here.
+     *
+     * The old `meta` stays exactly where it is. A rebuilt copy — the same boxes plus an `infe`,
+     * an `iloc` entry and a `cdsc` reference for the new item — is written after it, followed by an
+     * `mdat` holding the item and then any trailer. The copy is written typed `free`, so until the
+     * pointer writes the file still reads exactly as before. Those are two 4-byte type changes: the
+     * copy becomes `meta`, then the original becomes `free`. No item's data moves.
+     */
+    fun planInsert(src: ByteSource, layout: HeifBareLayout, newItem: ByteArray): HeifExifPlan? {
+        val p = layout.parsed
+        val trailerLength = src.size - p.heifEnd
+        if (trailerLength < 0 || trailerLength > MAX_TRAILER_BYTES) return null
+        if (newItem.isEmpty() || newItem.size > MAX_ITEM_BYTES) return null
+        val trailer = if (trailerLength > 0) src.read(p.heifEnd, trailerLength.toInt()) else ByteArray(0)
+
+        val newStart = p.heifEnd
+        val probe = rebuildMeta(p, 0L, newItem.size.toLong()) ?: return null
+        val itemOffset = newStart + probe.size + 8
+        val meta = rebuildMeta(p, itemOffset, newItem.size.toLong()) ?: return null
+        if (meta.size != probe.size || meta.size > MAX_META_BYTES) return null
+
+        val stagedMeta = meta.copyOf().also { "free".toByteArray(Charsets.ISO_8859_1).copyInto(it, 4) }
+        val mdat = toBe(8L + newItem.size, 4) + "mdat".toByteArray(Charsets.ISO_8859_1) + newItem
+        val oldTypeAt = p.metaBox.start + 4
+        return HeifExifPlan(
+            dataWrites = listOf(FileWrite(newStart, stagedMeta + mdat + trailer)),
+            pointerWrites = listOf(
+                FileWrite(newStart + 4, "meta".toByteArray(Charsets.ISO_8859_1)),
+                FileWrite(oldTypeAt, "free".toByteArray(Charsets.ISO_8859_1)),
+            ),
+            undoWrites = listOf(
+                FileWrite(oldTypeAt, "meta".toByteArray(Charsets.ISO_8859_1)),
+                FileWrite(newStart, trailer),
+            ),
+            oldLength = src.size,
+            newLength = src.size + meta.size + mdat.size,
+            newItemOffset = itemOffset,
+            newItem = newItem,
+            trailer = trailer,
+        )
+    }
+
+    /** [verify] for a [planInsert] plan. */
+    fun verifyInsert(src: ByteSource, before: HeifBareLayout, plan: HeifExifPlan, trailerStart: Long?): Boolean {
+        if (src.size != plan.newLength) return false
+        val after = locate(src, trailerStart) ?: return false
+        if (after.exifItemOffset != plan.newItemOffset || after.exifItemLength != plan.newItem.size) return false
+        if (after.rotationCcw != before.rotationCcw || after.mirrored != before.mirrored) return false
+        if (after.otherDataEnd != before.otherDataEnd) return false
+        if (!src.read(after.exifItemOffset, after.exifItemLength).contentEquals(plan.newItem)) return false
+        if (plan.trailer.isNotEmpty() &&
+            !src.read(src.size - plan.trailer.size, plan.trailer.size).contentEquals(plan.trailer)
+        ) return false
+        return true
+    }
+
+    /** The Exif item for a block in [ExifEditor]'s form, laid out as HeifWriter does it. */
+    fun newItem(block: ByteArray): ByteArray = byteArrayOf(0, 0, 0, EXIF_SIGNATURE.size.toByte()) + block
+
+    /**
+     * The meta box with an Exif item added whose data is at absolute [itemOffset]. Null when a
+     * field the item needs cannot hold its value.
+     */
+    private fun rebuildMeta(p: Parsed, itemOffset: Long, itemLength: Long): ByteArray? {
+        val m = p.meta
+        val iloc = p.iloc
+        if (!fits(itemOffset, iloc.offsetSize) || !fits(itemLength, iloc.lengthSize)) return null
+
+        val newId = (p.types.keys + iloc.items.keys + p.primary).max() + 1
+        val iinf = p.children.first { it.type == "iinf" }
+        val ilocBox = p.children.first { it.type == "iloc" }
+        val iref = p.children.firstOrNull { it.type == "iref" }
+
+        // Item IDs are 16-bit wherever these versions say so.
+        if (iloc.version < 2 && newId > 0xFFFF) return null
+        if (newId > 0xFFFF) return null // infe v2 carries a 16-bit ID
+        val irefVersion = iref?.let { m[it.bodyStart].toInt() } ?: 0
+        if (irefVersion > 1) return null
+        if (irefVersion == 0 && (newId > 0xFFFF || p.primary > 0xFFFF)) return null
+
+        // iinf: one more entry, an infe v2 of type Exif with an empty name.
+        val iinfBody = m.copyOfRange(iinf.bodyStart, iinf.end)
+        val iinfCountSize = if (iinfBody[0].toInt() == 0) 2 else 4
+        val iinfCount = be(iinfBody, 4, iinfCountSize) + 1
+        if (!fits(iinfCount, iinfCountSize)) return null
+        toBe(iinfCount, iinfCountSize).copyInto(iinfBody, 4)
+        val infe = box("infe", byteArrayOf(2, 0, 0, 0) + toBe(newId, 2) + toBe(0, 2) +
+            "Exif".toByteArray(Charsets.ISO_8859_1) + byteArrayOf(0))
+        val newIinf = box("iinf", iinfBody + infe)
+
+        // iloc: one more item, a single extent in this file at itemOffset.
+        val ilocBody = m.copyOfRange(ilocBox.bodyStart, ilocBox.end)
+        val idSize = if (iloc.version < 2) 2 else 4
+        val ilocCount = be(ilocBody, 6, idSize) + 1
+        if (!fits(ilocCount, idSize)) return null
+        toBe(ilocCount, idSize).copyInto(ilocBody, 6)
+        var entry = toBe(newId, idSize)
+        if (iloc.version >= 1) entry += toBe(0, 2) // construction_method 0: this file
+        entry += toBe(0, 2) + ByteArray(iloc.baseSize) + toBe(1, 2) + ByteArray(iloc.indexSize) +
+            toBe(itemOffset, iloc.offsetSize) + toBe(itemLength, iloc.lengthSize)
+        val newIloc = box("iloc", ilocBody + entry)
+
+        // iref: the Exif item describes the primary image.
+        val idWidth = if (irefVersion == 0) 2 else 4
+        val cdsc = box("cdsc", toBe(newId, idWidth) + toBe(1, 2) + toBe(p.primary, idWidth))
+        val newIref = if (iref != null) box("iref", m.copyOfRange(iref.bodyStart, iref.end) + cdsc)
+        else box("iref", byteArrayOf(0, 0, 0, 0) + cdsc)
+
+        var body = m.copyOfRange(p.metaBox.headerSize, p.metaBox.headerSize + 4) // version + flags
+        for (child in p.children) {
+            body += when (child.type) {
+                "iinf" -> newIinf
+                "iloc" -> newIloc
+                "iref" -> newIref
+                else -> m.copyOfRange(child.start.toInt(), child.end)
+            }
+        }
+        if (iref == null) body += newIref
+        return box("meta", body)
+    }
+
+    private fun box(type: String, body: ByteArray): ByteArray =
+        toBe(8L + body.size, 4) + type.toByteArray(Charsets.ISO_8859_1) + body
+
+    /** The furthest byte any in-file item other than [except] reaches. */
+    private fun otherDataEnd(iloc: Iloc, except: Long?): Long {
+        var otherEnd = 0L
+        for ((id, item) in iloc.items) {
+            if (id == except || item.constructionMethod != 0) continue
+            for (e in item.extents) {
+                // A zero length means "to the end of the file": nothing may be inserted before it.
+                otherEnd = maxOf(otherEnd, if (e.length == 0L) Long.MAX_VALUE else item.baseOffset + e.offset + e.length)
+            }
+        }
+        return otherEnd
+    }
+
+    /** The parts of a HEIF both [locate] and [locateBare] need. */
+    internal class Parsed(
+        internal val heifEnd: Long,
+        internal val metaBox: Box,
+        /** The whole meta box, header included; child box positions are relative to it. */
+        internal val meta: ByteArray,
+        internal val children: List<Box>,
+        internal val primary: Long,
+        internal val types: Map<Long, String>,
+        internal val iloc: Iloc,
+        internal val rotationCcw: Int,
+        internal val mirrored: Boolean,
+    )
+
+    private fun parse(src: ByteSource, trailerStart: Long?): Parsed? {
         val limit = (trailerStart ?: src.size).coerceIn(0, src.size)
         var position = 0L
         var heifEnd = 0L
@@ -136,26 +349,7 @@ object HeifExif {
         } ?: return null
 
         val types = children.firstOrNull { it.type == "iinf" }?.let { itemTypes(m, it) } ?: return null
-        val exifIds = types.filterValues { it == "Exif" }.keys
-        if (exifIds.size != 1) return null
-        val exifId = exifIds.first()
-
         val iloc = children.firstOrNull { it.type == "iloc" }?.let { parseIloc(m, it) } ?: return null
-        val exif = iloc.items[exifId] ?: return null
-        if (exif.constructionMethod != 0 || exif.dataReference != 0 || exif.extents.size != 1) return null
-        if (iloc.offsetSize == 0 || iloc.lengthSize == 0) return null
-        val extent = exif.extents.single()
-        val itemOffset = exif.baseOffset + extent.offset
-        if (extent.length <= 0 || extent.length > MAX_ITEM_BYTES || itemOffset + extent.length > src.size) return null
-
-        var otherEnd = 0L
-        for ((id, item) in iloc.items) {
-            if (id == exifId || item.constructionMethod != 0) continue
-            for (e in item.extents) {
-                // A zero length means "to the end of the file": nothing may be inserted before it.
-                otherEnd = maxOf(otherEnd, if (e.length == 0L) Long.MAX_VALUE else item.baseOffset + e.offset + e.length)
-            }
-        }
 
         var rotation = 0
         var mirrored = false
@@ -172,19 +366,7 @@ object HeifExif {
             }
         }
 
-        return HeifExifLayout(
-            heifEnd = heifEnd,
-            exifItemOffset = itemOffset,
-            exifItemLength = extent.length.toInt(),
-            rotationCcw = rotation,
-            mirrored = mirrored,
-            offsetField = metaBox.start + extent.offsetField,
-            offsetFieldSize = iloc.offsetSize,
-            lengthField = metaBox.start + extent.lengthField,
-            lengthFieldSize = iloc.lengthSize,
-            baseOffset = exif.baseOffset,
-            otherDataEnd = otherEnd,
-        )
+        return Parsed(heifEnd, metaBox, m, children, primary, types, iloc, rotation, mirrored)
     }
 
     /**
@@ -268,7 +450,7 @@ object HeifExif {
 
     // region box parsing
 
-    private class Box(val type: String, val start: Long, val size: Long, val headerSize: Int) {
+    internal class Box(val type: String, val start: Long, val size: Long, val headerSize: Int) {
         val bodyStart: Int get() = (start + headerSize).toInt()
         val end: Int get() = (start + size).toInt()
     }
@@ -311,16 +493,23 @@ object HeifExif {
         return out
     }
 
-    private class Extent(val offset: Long, val length: Long, val offsetField: Int, val lengthField: Int)
+    internal class Extent(val offset: Long, val length: Long, val offsetField: Int, val lengthField: Int)
 
-    private class IlocItem(
+    internal class IlocItem(
         val constructionMethod: Int,
         val dataReference: Int,
         val baseOffset: Long,
         val extents: List<Extent>,
     )
 
-    private class Iloc(val offsetSize: Int, val lengthSize: Int, val items: Map<Long, IlocItem>)
+    internal class Iloc(
+        val version: Int,
+        val offsetSize: Int,
+        val lengthSize: Int,
+        val baseSize: Int,
+        val indexSize: Int,
+        val items: Map<Long, IlocItem>,
+    )
 
     private fun parseIloc(m: ByteArray, box: Box): Iloc? {
         val version = m[box.bodyStart].toInt()
@@ -355,7 +544,7 @@ object HeifExif {
             }
             items[id] = IlocItem(method, dataRef, base, extents)
         }
-        return Iloc(offsetSize, lengthSize, items)
+        return Iloc(version, offsetSize, lengthSize, baseSize, indexSize, items)
     }
 
     /** 1-based property indices associated with [itemId] in `ipma`. */

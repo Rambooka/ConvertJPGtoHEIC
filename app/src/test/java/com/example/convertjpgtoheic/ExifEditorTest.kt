@@ -53,6 +53,53 @@ class ExifEditorTest {
     // region editing
 
     @Test
+    fun `dates a block whose Exif sub-IFD is empty`() {
+        // Verbatim from 20191221_081314.jpg (an edited photo): Orientation, and a pointer to an
+        // Exif IFD with zero entries. Rejecting that IFD left these photos permanently undated.
+        val block = "Exif\u0000\u0000".toByteArray(Charsets.ISO_8859_1) + byteArrayOf(
+            0x4D, 0x4D, 0x00, 0x2A, 0x00, 0x00, 0x00, 0x08,
+            0x00, 0x02,
+            0x01, 0x12, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
+            0x87.toByte(), 0x69, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x26,
+            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        )
+        assertTrue(ExifEditor.summarise(block)!!.hasExifIfd)
+
+        val edited = ExifEditor.edit(block, dateTimeOriginal = "2019:12:21 08:13:14", offset = ZoneOffset.ofHours(13))!!
+        val s = ExifEditor.summarise(edited)!!
+        assertEquals("2019:12:21 08:13:14", s.dateTimeOriginal)
+        assertTrue(s.hasOffsetTimeOriginal)
+        assertEquals(1, s.orientation)
+    }
+
+    @Test
+    fun `a date chosen by hand replaces an unreadable one in place`() {
+        val block = MetadataTestData.exifBlock(
+            ifd0 = listOf(Tag.Ascii(0x0132, "0000:00:00 00:00:00")),
+            exif = listOf(Tag.Ascii(0x9003, "0000:00:00 00:00:00")),
+        )
+        // Without the flag an existing value is never touched...
+        val kept = ExifEditor.edit(block, dateTimeOriginal = "1998:03:12 12:00:00", offset = ZoneOffset.ofHours(13))!!
+        assertNull(ExifEditor.summarise(kept)!!.dateTimeOriginal)
+
+        // ...with it, the user's date wins.
+        val edited = ExifEditor.edit(
+            block, dateTimeOriginal = "1998:03:12 12:00:00", offset = ZoneOffset.ofHours(13), replaceDate = true,
+        )!!
+        val s = ExifEditor.summarise(edited)!!
+        assertEquals("1998:03:12 12:00:00", s.dateTimeOriginal)
+        assertTrue(s.hasOffsetTimeOriginal)
+
+        // Changing it again rewrites the same bytes rather than growing the block.
+        val again = ExifEditor.edit(
+            edited, dateTimeOriginal = "1999:01:02 12:00:00", offset = ZoneOffset.ofHours(13), replaceDate = true,
+        )!!
+        assertEquals(edited.size, again.size)
+        assertEquals("1999:01:02 12:00:00", ExifEditor.summarise(again)!!.dateTimeOriginal)
+    }
+
+    @Test
     fun `patches Orientation in place without growing the block`() {
         val block = MetadataTestData.samsungLikeExif(1, "2017:07:28 08:20:28")
         val edited = ExifEditor.edit(block, orientation = 6)!!

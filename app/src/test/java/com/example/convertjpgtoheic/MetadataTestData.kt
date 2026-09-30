@@ -130,8 +130,10 @@ object MetadataTestData {
         mirrored: Boolean = false,
         trailer: ByteArray = ByteArray(0),
         imageExtentPastEnd: Boolean = false,
+        /** False leaves out the Exif item entirely, as early converter builds did. */
+        withExif: Boolean = true,
     ): Heif {
-        val exifItem = ByteBuffer.allocate(4).putInt(6).array() + exifBlock
+        val exifItem = if (withExif) ByteBuffer.allocate(4).putInt(6).array() + exifBlock else ByteArray(0)
         val image = ByteArray(300) { (it * 7 + 3).toByte() }
 
         val ftyp = box("ftyp", "heic".ascii() + ByteArray(4) + "mif1heic".ascii())
@@ -145,14 +147,15 @@ object MetadataTestData {
             val pitm = fullBox("pitm", 0, u16(1))
             val infeImage = fullBox("infe", 2, u16(1) + u16(0) + "hvc1".ascii() + byteArrayOf(0))
             val infeExif = fullBox("infe", 2, u16(2) + u16(0) + "Exif".ascii() + byteArrayOf(0))
-            val iinf = fullBox("iinf", 0, u16(2) + infeImage + infeExif)
+            val items = if (withExif) 2 else 1
+            val iinf = fullBox("iinf", 0, u16(items) + infeImage + (if (withExif) infeExif else ByteArray(0)))
             val iloc = fullBox(
                 "iloc", 1,
-                byteArrayOf(0x44, 0x00) + u16(2) +
+                byteArrayOf(0x44, 0x00) + u16(items) +
                     // item 1: image
                     u16(1) + u16(0) + u16(0) + u16(1) + u32(imageOffsetInIloc) + u32(image.size) +
                     // item 2: Exif
-                    u16(2) + u16(0) + u16(0) + u16(1) + u32(exifOffset) + u32(exifItem.size),
+                    (if (withExif) u16(2) + u16(0) + u16(0) + u16(1) + u32(exifOffset) + u32(exifItem.size) else ByteArray(0)),
             )
             val props = ArrayList<ByteArray>()
             props += box("ispe", ByteArray(4) + u32(640) + u32(480))
