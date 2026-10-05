@@ -109,6 +109,30 @@ This frees
         <item quantity="one">Waiting for you to confirm deleting %1$d original video.</item>
         <item quantity="other">Waiting for you to confirm deleting %1$d original videos.</item>
     </plurals>
+    <string name="action_music">Convert music to Opus</string>
+    <string name="action_music_hint">Re-encodes every MP3 in your music library as Opus (.opus),
+        keeping title, artist, album and cover. A song is only kept as .opus if it comes out
+        smaller. Covers the whole library, not just this range. Uses the delete option above.</string>
+    <string name="music_title">Convert music to Opus?</string>
+    <string name="music_message_delete">Each MP3 in your music library is re-encoded as Opus and
+        saved beside it as name.opus, with its tags and cover copied across. A copy is only kept if
+        it is smaller than the MP3, and only after it has been checked against it.\n\nYou will be
+        asked to confirm deleting the MP3s every 100 songs. Playlists that list the MP3s will lose
+        those songs; the new copies can be added back.\n\nRe-encoding a compressed file loses a
+        little quality. It is rarely audible at the bitrates used, but the MP3s cannot be got back
+        once deleted.</string>
+    <string name="music_message_keep">Each MP3 in your music library is re-encoded as Opus and
+        saved beside it as name.opus, with its tags and cover copied across. A copy is only kept if
+        it is smaller than the MP3, and only after it has been checked against it.\n\n\"Delete
+        originals\" is off, so the MP3s will be kept and both copies will show in your music
+        app.</string>
+    <string name="music_button">Convert</string>
+    <string name="music_need_permission">Allow access to music and audio to convert it.</string>
+    <string name="progress_music">Converting song %1$d of %2$d · %3$d%%\n%4$s\nConverted %5$d · saved %6$s so far</string>
+    <plurals name="awaiting_music_deletion">
+        <item quantity="one">Waiting for you to confirm deleting %1$d MP3.</item>
+        <item quantity="other">Waiting for you to confirm deleting %1$d MP3s.</item>
+    </plurals>
     <string name="action_repair">Repair converted photos</string>
     <string name="action_repair_hint">Fixes HEICs that show sideways in some viewers (Phone Link,
         for one) or that have lost their date and sit at the top of the gallery. Checks your whole

@@ -87,7 +87,7 @@ class ConversionService : Service() {
                         buildNotification(
                             text = if (state.mode == RunMode.REPAIR) {
                                 repairNotificationText(state.progress)
-                            } else if (state.mode == RunMode.VIDEO) {
+                            } else if (state.mode == RunMode.VIDEO || state.mode == RunMode.MUSIC) {
                                 "${state.progress.currentName} · ${(state.progress.itemFraction * 100).toInt()}%" +
                                     (state.progress.remainingMs?.let { " · ~${(it + 59_999) / 60_000} min left" } ?: "")
                             } else if (state.progress.promptAt > 0) {
@@ -111,6 +111,8 @@ class ConversionService : Service() {
                                 "Allow the repair of ${state.pending} photos"
                             } else if (state.mode == RunMode.VIDEO) {
                                 "Confirm deleting ${state.pending} original videos"
+                            } else if (state.mode == RunMode.MUSIC) {
+                                "Confirm deleting ${state.pending} original MP3s"
                             } else if (state.lowOnSpace) {
                                 "Storage low — confirm deleting ${state.pending} originals"
                             } else {
@@ -159,6 +161,8 @@ class ConversionService : Service() {
                 "Repaired: ${report.repairedDates} dates, ${report.repairedRotations} rotations"
             report.mode == RunMode.VIDEO && report.cancelled -> "Video conversion cancelled"
             report.mode == RunMode.VIDEO -> "Converted ${report.converted} videos"
+            report.mode == RunMode.MUSIC && report.cancelled -> "Music conversion cancelled"
+            report.mode == RunMode.MUSIC -> "Converted ${report.converted} songs"
 
             report.failureCount > 0 && report.converted == 0 -> "Nothing converted — tap for details"
             pending -> "Converted ${report.converted} — tap to delete the originals"
@@ -212,6 +216,7 @@ class ConversionService : Service() {
                 RunMode.CLEAN_UP -> "Finding leftovers"
                 RunMode.REPAIR -> "Repairing photos"
                 RunMode.VIDEO -> "Converting videos"
+                RunMode.MUSIC -> "Converting music"
                 RunMode.CONVERT -> "Converting photos"
             }
         )
