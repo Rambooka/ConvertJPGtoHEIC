@@ -1,4 +1,6 @@
 # Convert JPG to HEIC
+# Convert Movie to HEVC
+# Convert MP3 to Opus
 
 An Android app that bulk re-encodes JPGs in your photo library to HEIC, over a date range you
 pick, to reclaim storage. It is built around the assumption that it will be pointed at irreplaceable
