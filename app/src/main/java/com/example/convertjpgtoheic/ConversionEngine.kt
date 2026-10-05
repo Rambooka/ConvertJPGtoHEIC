@@ -38,6 +38,12 @@ enum class RunMode {
 
     /** Re-encode H.264 videos as HEVC, then offer to delete the originals. See [VideoConverter]. */
     VIDEO,
+
+    /**
+     * Re-encode the music library's MP3s as Opus in `.opus` files, keep each only if it is smaller,
+     * then offer to delete the MP3s. See [MusicConverter].
+     */
+    MUSIC,
 }
 
 /** What to do when a photo turns out to be a motion photo. */
@@ -232,6 +238,10 @@ data class RunReport(
     val videoSkippedCodec: Int = 0,
     /** Video runs only: a container or size this does not handle yet (.mov, 8K...). */
     val videoSkippedFormat: Int = 0,
+    /** Music runs only: MP3s that came out the same size or larger as Opus, and were kept. */
+    val musicNotSmaller: Int = 0,
+    /** Music runs only: earlier `.ogg` copies renamed to `.opus`. */
+    val musicRenamed: Int = 0,
 ) {
     /**
      * Records a whole-run failure with no single file behind it — no encoder, storage full.
@@ -353,6 +363,8 @@ class ConversionEngine private constructor(context: Context) {
     private val repairer = HeicRepair(app.contentResolver)
     private val videoConverter = VideoConverter(app)
     private val videoStaging = File(app.cacheDir, "video-staging")
+    private val musicConverter = MusicConverter(app)
+    private val musicStaging = File(app.cacheDir, "music-staging")
     /**
      * The handler is not optional. A revoked photo permission makes `ContentResolver.query` throw
      * SecurityException, and an uncaught throw from `launch` reaches the thread's default handler
@@ -472,6 +484,7 @@ class ConversionEngine private constructor(context: Context) {
                 RunMode.CLEAN_UP -> cleanUp(options)
                 RunMode.REPAIR -> repair()
                 RunMode.VIDEO -> convertVideos(options)
+                RunMode.MUSIC -> convertMusic(options)
                 else -> convert(mode, options)
             }
         }
@@ -1192,6 +1205,142 @@ class ConversionEngine private constructor(context: Context) {
 
     // endregion
 
+    // region music
+
+    /**
+     * Re-encodes every MP3 in the music library as Opus in an `.opus` file beside it.
+     *
+     * A copy is kept only if it is smaller than its MP3 (the point is the space) and only after
+     * [MusicConverter] has read it back and found the same length and tags. Originals are offered
+     * for deletion in batches. The two names differ by extension, so nothing needs renaming.
+     */
+    private suspend fun convertMusic(options: RunOptions) {
+        val mode = RunMode.MUSIC
+        if (!EncoderSupport.hasOpusEncoder) {
+            _state.value = UiState.Finished(RunReport(mode).withFailure(NO_OPUS_ENCODER))
+            return
+        }
+        // Copies made before the switch from `.ogg` first, so they count as already converted.
+        val renamed = repository.renameOwnOggsToOpus()
+        val tracks = repository.queryMusicMp3s()
+        if (tracks.isEmpty()) {
+            _state.value = UiState.Finished(RunReport(mode, musicRenamed = renamed))
+            return
+        }
+        if (!musicStaging.isDirectory) musicStaging.mkdirs()
+        musicStaging.listFiles()?.forEach { it.delete() }
+
+        var tally = RunReport(mode, musicRenamed = renamed)
+        val deleteAsWeGo = options.deleteOriginals
+        val waiting = ArrayList<Uri>()
+        var deletedTotal = 0
+        var declined = false
+
+        val totalMb = (tracks.sumOf { it.sizeBytes } / MB).toInt().coerceAtLeast(1)
+        val eta = Eta(totalMb)
+        var doneBytes = 0L
+
+        fun progress(index: Int, track: SourceTrack, fraction: Float) {
+            val doneMb = ((doneBytes + (track.sizeBytes * fraction).toLong()) / MB).toInt()
+            _state.value = UiState.Working(
+                mode,
+                RunProgress(
+                    done = index,
+                    total = tracks.size,
+                    currentName = track.displayName,
+                    converted = tally.converted,
+                    savedBytes = tally.savedBytes,
+                    failures = tally.failureCount,
+                    skippedExisting = tally.skippedExisting,
+                    skippedNotSmaller = tally.musicNotSmaller,
+                    pendingDeletions = waiting.size,
+                    remainingMs = eta.remainingMs(doneMb),
+                    itemFraction = fraction,
+                ),
+            )
+        }
+
+        suspend fun flushDeletions(index: Int) {
+            if (waiting.isEmpty()) return
+            _state.value = UiState.AwaitingDeletion(mode, index, tracks.size, waiting.size)
+            val answer = confirmDeletion(waiting.toList())
+            deletedTotal += answer.deleted
+            waiting.clear()
+            if (!answer.granted) declined = true
+        }
+
+        for ((index, track) in tracks.withIndex()) {
+            if (cancelRequested) break
+            progress(index, track, 0f)
+            try {
+                tally = convertOneTrack(options, track, tally, waiting) { progress(index, track, it) }
+            } finally {
+                doneBytes += track.sizeBytes
+            }
+            if (deleteAsWeGo && !declined &&
+                (waiting.size >= MUSIC_DELETE_EVERY || (waiting.isNotEmpty() && encoder.freeStagingBytes() in 0 until LOW_SPACE_THRESHOLD_BYTES))
+            ) {
+                flushDeletions(index + 1)
+            }
+        }
+        if (deleteAsWeGo && !declined) flushDeletions(tracks.size)
+        musicStaging.listFiles()?.forEach { it.delete() }
+
+        _state.value = UiState.Finished(
+            tally.copy(
+                cancelled = cancelRequested,
+                deletedOriginals = deletedTotal,
+                deletionOutcome = when {
+                    !deleteAsWeGo || tally.converted == 0 -> DeletionOutcome.NOT_REQUESTED
+                    declined -> DeletionOutcome.DECLINED
+                    else -> DeletionOutcome.COMPLETED
+                },
+            )
+        )
+    }
+
+    private fun convertOneTrack(
+        options: RunOptions,
+        track: SourceTrack,
+        tally: RunReport,
+        waiting: MutableList<Uri>,
+        onProgress: (Float) -> Unit,
+    ): RunReport {
+        // Converted by an earlier run, whose original the user chose to keep.
+        if (repository.opusExistsBeside(track)) return tally.copy(skippedExisting = tally.skippedExisting + 1)
+        val free = encoder.freeStagingBytes()
+        if (free in 0 until track.sizeBytes * 3 + MIN_FREE_SPACE_BYTES) {
+            return tally.withFailure(track.uri, track.displayName, track.sizeBytes,
+                "not enough free space to convert it (${free / MB} MB free)")
+        }
+
+        val stamp = System.nanoTime()
+        val scratch = File(musicStaging, "$stamp-raw.opus")
+        val staged = File(musicStaging, "$stamp.opus")
+        try {
+            val bytes = when (val outcome = musicConverter.convert(track, staged, scratch, onProgress)) {
+                is MusicConverter.Outcome.Failed ->
+                    return tally.withFailure(track.uri, track.displayName, track.sizeBytes, outcome.reason)
+                is MusicConverter.Outcome.Converted -> outcome.bytes
+            }
+            // Always, whatever the photo option says: a bigger copy would defeat the purpose.
+            if (bytes >= track.sizeBytes) return tally.copy(musicNotSmaller = tally.musicNotSmaller + 1)
+            repository.publishOpus(track, staged)
+                ?: return tally.withFailure(track.uri, track.displayName, track.sizeBytes, "could not be saved to the music library")
+            if (options.deleteOriginals) waiting += track.uri
+            return tally.copy(
+                converted = tally.converted + 1,
+                originalBytes = tally.originalBytes + track.sizeBytes,
+                heicBytes = tally.heicBytes + bytes,
+            )
+        } finally {
+            scratch.delete()
+            staged.delete()
+        }
+    }
+
+    // endregion
+
     // region repair
 
     /**
@@ -1504,6 +1653,9 @@ class ConversionEngine private constructor(context: Context) {
          *  the space is worth reclaiming sooner than the photo batch of 500. */
         private const val VIDEO_DELETE_EVERY = 25
 
+        /** Songs to convert before stopping to have their MP3s removed. */
+        private const val MUSIC_DELETE_EVERY = 100
+
         private const val MB = 1024L * 1024
 
         /** A repair checks tens of thousands of files; publishing every one would flood the UI. */
@@ -1529,6 +1681,8 @@ class ConversionEngine private constructor(context: Context) {
 
         /** JPGs smaller than this (1 MB) are passed over: too little to gain to be worth re-encoding. */
         private const val MIN_CONVERT_SIZE_BYTES = 1024L * 1024
+
+        const val NO_OPUS_ENCODER = "This device has no Opus encoder, so music cannot be converted."
 
         const val NO_ENCODER = "This device has no HEIC (HEVC) encoder, so nothing can be converted."
 

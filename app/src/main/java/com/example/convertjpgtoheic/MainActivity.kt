@@ -120,6 +120,7 @@ class MainActivity : AppCompatActivity() {
         binding.cleanupButton.setOnClickListener { confirmThenCleanUp() }
         binding.repairButton.setOnClickListener { confirmThenRepair() }
         binding.videoButton.setOnClickListener { confirmThenConvertVideos() }
+        binding.musicButton.setOnClickListener { confirmThenConvertMusic() }
         binding.cancelButton.setOnClickListener { engine.cancel() }
 
         binding.qualitySlider.addOnChangeListener { _, value, _ ->
@@ -420,9 +421,9 @@ class MainActivity : AppCompatActivity() {
      * Activity cannot be relied on to survive it.
      */
     private fun startRun(mode: RunMode) {
-        // A repair covers the whole library, so it is the one run that needs no range.
+        // A repair and a music run cover the whole library, so they are the runs that need no range.
         val current = range?.takeIf { it.isValid }
-            ?: if (mode == RunMode.REPAIR) DateRange(0L, Long.MAX_VALUE) else null
+            ?: if (mode == RunMode.REPAIR || mode == RunMode.MUSIC) DateRange(0L, Long.MAX_VALUE) else null
         if (current == null) {
             binding.statusText.setText(R.string.pick_range_first)
             return
@@ -542,6 +543,33 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    private fun readAudioPermission() =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.READ_MEDIA_AUDIO
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+
+    /** Converts the whole music library; the date range is about photos and does not apply. */
+    private fun confirmThenConvertMusic() {
+        // Asked for only here, when music is actually wanted, rather than up front.
+        if (!granted(readAudioPermission())) {
+            binding.statusText.setText(R.string.music_need_permission)
+            permissionLauncher.launch(arrayOf(readAudioPermission()))
+            return
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.music_title)
+            .setMessage(
+                getString(
+                    if (settings.deleteOriginals) R.string.music_message_delete else R.string.music_message_keep
+                )
+            )
+            .setPositiveButton(R.string.music_button) { _, _ -> startRun(RunMode.MUSIC) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
     private fun confirmThenRepair() {
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.repair_title)
@@ -586,6 +614,8 @@ class MainActivity : AppCompatActivity() {
         binding.cleanupButton.isEnabled = usable
         binding.repairButton.isEnabled = usable
         binding.videoButton.isEnabled = usable && EncoderSupport.hasHevcEncoder
+        // Music needs neither photo access nor a range, only its own permission (asked on tap).
+        binding.musicButton.isEnabled = !busy && EncoderSupport.hasOpusEncoder
         binding.rangeButton.isEnabled = !busy
         binding.cancelButton.isVisible(state is UiState.Working || state is UiState.AwaitingDeletion)
         binding.progressBar.isVisible(busy)
@@ -626,6 +656,7 @@ class MainActivity : AppCompatActivity() {
                     RunMode.CLEAN_UP -> getString(R.string.progress_cleanup)
                     RunMode.REPAIR -> repairStatus(state.progress)
                     RunMode.VIDEO -> videoStatus(state.progress)
+                    RunMode.MUSIC -> musicStatus(state.progress)
                     RunMode.DRY_RUN -> runningStatus(state.progress, R.string.progress_measuring)
                     RunMode.CONVERT -> runningStatus(state.progress, R.string.progress_converting)
                 }
@@ -639,6 +670,7 @@ class MainActivity : AppCompatActivity() {
                     when {
                         state.mode == RunMode.REPAIR -> R.plurals.awaiting_repair_access
                         state.mode == RunMode.VIDEO -> R.plurals.awaiting_video_deletion
+                        state.mode == RunMode.MUSIC -> R.plurals.awaiting_music_deletion
                         state.lowOnSpace -> R.plurals.awaiting_deletion_low_space
                         else -> R.plurals.awaiting_deletion
                     },
@@ -665,6 +697,7 @@ class MainActivity : AppCompatActivity() {
             RunMode.CLEAN_UP -> "Clean-up"
             RunMode.REPAIR -> "Repair"
             RunMode.VIDEO -> "Video conversion"
+            RunMode.MUSIC -> "Music conversion"
         }
         appendLine(if (report.cancelled) "$label cancelled — partial results below." else "$label complete.")
         appendLine()
@@ -679,6 +712,10 @@ class MainActivity : AppCompatActivity() {
         }
         if (report.mode == RunMode.VIDEO) {
             describeVideos(report)
+            return@buildString
+        }
+        if (report.mode == RunMode.MUSIC) {
+            describeMusic(report)
             return@buildString
         }
 
@@ -811,6 +848,37 @@ class MainActivity : AppCompatActivity() {
             )
             else -> if (report.converted > 0) appendLine("Originals were kept.")
         }
+    }
+
+    private fun StringBuilder.describeMusic(report: RunReport) {
+        if (report.converted == 0) {
+            appendLine("No songs were converted.")
+        } else {
+            appendLine("Songs converted:   ${report.converted}")
+            appendLine("MP3 size:          ${formatSize(report.originalBytes)}")
+            appendLine("Opus size:         ${formatSize(report.heicBytes)}")
+            appendLine("Space saved:       ${formatSize(report.savedBytes)} (${report.savedPercent}%)")
+        }
+        if (report.musicRenamed > 0) appendLine("Renamed .ogg → .opus: ${report.musicRenamed}")
+        if (report.musicNotSmaller > 0) appendLine("Not smaller:       ${report.musicNotSmaller} (kept the MP3)")
+        if (report.skippedExisting > 0) appendLine("Already converted: ${report.skippedExisting}")
+        when (report.deletionOutcome) {
+            DeletionOutcome.COMPLETED -> appendLine("MP3s deleted:      ${report.deletedOriginals}")
+            DeletionOutcome.DECLINED -> appendLine(
+                "MP3s kept:         deletion was declined (${report.deletedOriginals} deleted before that)"
+            )
+            else -> if (report.converted > 0) appendLine("The MP3s were kept.")
+        }
+    }
+
+    private fun musicStatus(p: RunProgress): String = buildString {
+        appendLine(
+            getString(
+                R.string.progress_music,
+                p.done + 1, p.total, (p.itemFraction * 100).toInt(), p.currentName, p.converted, formatSize(p.savedBytes),
+            )
+        )
+        append(etaText(p.remainingMs))
     }
 
     private fun videoStatus(p: RunProgress): String = buildString {

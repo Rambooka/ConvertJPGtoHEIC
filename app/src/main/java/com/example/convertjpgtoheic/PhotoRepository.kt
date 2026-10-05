@@ -55,8 +55,22 @@ object PhotoNaming {
         return if (allowed) "$normalised/" else "Movies/$normalised/"
     }
 
+    /**
+     * [targetRelativePath] for the audio collection. A song outside the folders it accepts (one in
+     * `Download/`, say) gets its copy under `Music/` instead.
+     */
+    fun targetAudioPath(sourcePath: String): String {
+        val normalised = sourcePath.trim('/')
+        if (normalised.isEmpty()) return "Music/"
+        val primary = normalised.substringBefore('/')
+        val allowed = ALLOWED_AUDIO_DIRS.any { it.equals(primary, ignoreCase = true) }
+        return if (allowed) "$normalised/" else "Music/$normalised/"
+    }
+
     private val ALLOWED_PRIMARY_DIRS = listOf("DCIM", "Pictures")
     private val ALLOWED_VIDEO_DIRS = listOf("DCIM", "Movies", "Pictures")
+    private val ALLOWED_AUDIO_DIRS =
+        listOf("Alarms", "Audiobooks", "Music", "Notifications", "Podcasts", "Recordings", "Ringtones")
 }
 
 /** One HEIC in the library, with what a repair needs to judge and fix it. */
@@ -623,6 +637,124 @@ class PhotoRepository(private val context: Context) {
     }.getOrElse {
         Log.w(TAG, "Could not rename $uri to $name", it)
         false
+    }
+
+    // endregion
+
+    // region music
+
+    private val audioCollection: Uri = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+
+    /**
+     * Every MP3 the music library knows of, folder by folder. Not limited to the date range: songs
+     * have no capture date, and the range is about when photos were taken.
+     */
+    fun queryMusicMp3s(): List<SourceTrack> {
+        val projection = arrayOf(
+            MediaStore.Audio.Media._ID,
+            MediaStore.Audio.Media.DISPLAY_NAME,
+            MediaStore.Audio.Media.RELATIVE_PATH,
+            MediaStore.Audio.Media.VOLUME_NAME,
+            MediaStore.Audio.Media.SIZE,
+            MediaStore.Audio.Media.DURATION,
+            MediaStore.Audio.Media.BITRATE,
+        )
+        val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0 AND ${MediaStore.Audio.Media.MIME_TYPE} = ?"
+        val out = ArrayList<SourceTrack>()
+        resolver.query(
+            audioCollection, projection, selection, arrayOf("audio/mpeg"),
+            "${MediaStore.Audio.Media.RELATIVE_PATH} ASC, ${MediaStore.Audio.Media.DISPLAY_NAME} ASC",
+        )?.use { c ->
+            while (c.moveToNext()) {
+                out += SourceTrack(
+                    uri = ContentUris.withAppendedId(audioCollection, c.getLong(0)),
+                    displayName = c.getString(1) ?: continue,
+                    relativePath = c.getString(2) ?: "Music/",
+                    volumeName = c.getString(3) ?: MediaStore.VOLUME_EXTERNAL_PRIMARY,
+                    sizeBytes = c.getLong(4),
+                    durationMs = c.getLong(5),
+                    bitrate = c.getLongOrNull(6)?.takeIf { it > 0 },
+                )
+            }
+        }
+        return out
+    }
+
+    /** Whether [track]'s `.opus` already sits in the folder its copy would go to. */
+    fun opusExistsBeside(track: SourceTrack): Boolean =
+        resolver.query(
+            MediaStore.Audio.Media.getContentUri(track.volumeName),
+            arrayOf(MediaStore.Audio.Media._ID),
+            "${MediaStore.Audio.Media.RELATIVE_PATH} = ? AND ${MediaStore.Audio.Media.DISPLAY_NAME} = ?",
+            arrayOf(PhotoNaming.targetAudioPath(track.relativePath), track.opusName),
+            null,
+        )?.use { it.count > 0 } ?: false
+
+    /**
+     * Publishes [staged] as [SourceTrack.opusName] beside the original, and returns its URI. The
+     * scanner reads title, artist, album and cover from the file's own tags when it goes live.
+     */
+    fun publishOpus(track: SourceTrack, staged: java.io.File): Uri? {
+        val values = ContentValues().apply {
+            put(MediaStore.Audio.Media.DISPLAY_NAME, track.opusName)
+            put(MediaStore.Audio.Media.MIME_TYPE, OPUS_MIME)
+            put(MediaStore.Audio.Media.RELATIVE_PATH, PhotoNaming.targetAudioPath(track.relativePath))
+            put(MediaStore.Audio.Media.IS_PENDING, 1)
+        }
+        val uri = try {
+            resolver.insert(MediaStore.Audio.Media.getContentUri(track.volumeName), values)
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not create a row for ${track.opusName}", e)
+            null
+        } ?: return null
+        return try {
+            val copied = resolver.openOutputStream(uri, "w")?.use { out ->
+                staged.inputStream().use { it.copyTo(out, COPY_BUFFER) }
+            } ?: 0L
+            if (copied != staged.length()) throw IllegalStateException("copied $copied of ${staged.length()} bytes")
+            resolver.update(uri, ContentValues().apply { put(MediaStore.Audio.Media.IS_PENDING, 0) }, null, null)
+            uri
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not publish ${track.opusName}", e)
+            discard(uri)
+            null
+        }
+    }
+
+    /**
+     * Renames this app's own `.ogg` copies, from before the switch to `.opus` (see
+     * [MusicConverter]), and returns how many it renamed. The app created them, so no consent is
+     * needed. A name already taken is left alone.
+     */
+    fun renameOwnOggsToOpus(): Int {
+        val ids = ArrayList<Pair<Long, String>>()
+        resolver.query(
+            audioCollection,
+            arrayOf(MediaStore.Audio.Media._ID, MediaStore.Audio.Media.DISPLAY_NAME),
+            "${MediaStore.Audio.Media.OWNER_PACKAGE_NAME} = ? AND ${MediaStore.Audio.Media.DISPLAY_NAME} LIKE ?",
+            arrayOf(context.packageName, "%.ogg"),
+            null,
+        )?.use { c -> while (c.moveToNext()) ids += c.getLong(0) to (c.getString(1) ?: continue) }
+        var renamed = 0
+        for ((id, name) in ids) {
+            val values = ContentValues().apply {
+                put(MediaStore.Audio.Media.DISPLAY_NAME, PhotoNaming.baseName(name) + ".opus")
+                put(MediaStore.Audio.Media.MIME_TYPE, OPUS_MIME)
+            }
+            runCatching { resolver.update(ContentUris.withAppendedId(audioCollection, id), values, null, null) }
+                .onSuccess { if (it > 0) renamed++ }
+                .onFailure { Log.w(TAG, "Could not rename $name to .opus", it) }
+        }
+        return renamed
+    }
+
+    /**
+     * What Android calls an `.opus` file. Asked of the platform rather than assumed: MediaProvider
+     * changes the extension of a name that does not match its MIME type, which would turn
+     * `song.opus` into `song.opus.ogg`.
+     */
+    private val OPUS_MIME: String by lazy {
+        android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension("opus") ?: "audio/ogg"
     }
 
     // endregion

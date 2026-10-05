@@ -7,6 +7,8 @@
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <!-- Only for "Convert videos": finding the MP4s and re-encoding them as HEVC. -->
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <!-- Only for "Convert music": finding the MP3s and re-encoding them as Opus. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <!-- Required so MediaStore hands us the *unredacted* original, GPS EXIF included. -->
     <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION" />

@@ -30,6 +30,15 @@ object EncoderSupport {
     /** Cached because [MediaCodecList] enumeration is not free and the answer cannot change. */
     val hasHevcEncoder: Boolean by lazy { hasImageEncoder() || hasTileCapableHevcEncoder() }
 
+    /** Whether music can be converted: Android's Opus encoder, present since Android 10. */
+    val hasOpusEncoder: Boolean by lazy {
+        runCatching {
+            MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.any { info ->
+                info.isEncoder && info.supportedTypes.any { it.equals(MediaFormat.MIMETYPE_AUDIO_OPUS, ignoreCase = true) }
+            }
+        }.onFailure { Log.w(TAG, "Could not enumerate codecs for Opus", it) }.getOrDefault(false)
+    }
+
     /** A dedicated HEIC image encoder, which HeifWriter prefers and uses without grid mode. */
     private fun hasImageEncoder(): Boolean =
         supportsAtLeast(MediaFormat.MIMETYPE_IMAGE_ANDROID_HEIC, requireTile = false)
