@@ -40,6 +40,13 @@ object OggOpus {
     const val FLAG_FIRST = 0x02
     const val FLAG_LAST = 0x04
 
+    /**
+     * The largest packet Android's Ogg parser accepts (OggExtractor, "arbitrary limit of 16 MB",
+     * b/36592202). A bigger OpusTags packet fails the parser's set-up, and the file then reports
+     * no tracks at all — to MediaStore and every player built on it, not just to [retag]'s caller.
+     */
+    const val MAX_PACKET_BYTES = 16 * 1024 * 1024
+
     /** Copies the Ogg Opus stream [input] to [out] with its tags replaced by [comments]. */
     fun retag(input: InputStream, out: OutputStream, comments: List<Pair<String, String>>) {
         val head = readPage(input) ?: throw FormatException("empty file")
@@ -120,6 +127,11 @@ object OggOpus {
         }
         return out.toByteArray()
     }
+
+    /** The size of [commentPacket] for these arguments, without building it. */
+    fun commentPacketSize(vendor: String, comments: List<Pair<String, String>>): Long =
+        OPUS_TAGS.size + 4L + vendor.toByteArray(Charsets.UTF_8).size + 4 +
+            comments.sumOf { (key, value) -> 4L + "$key=$value".toByteArray(Charsets.UTF_8).size }
 
     /**
      * A picture as a `METADATA_BLOCK_PICTURE` value: a FLAC picture block, base64-encoded. Width,

@@ -1,6 +1,10 @@
 package com.example.convertjpgtoheic
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.ImageDecoder
 import android.media.AudioFormat
 import android.media.MediaCodec
 import android.media.MediaExtractor
@@ -10,6 +14,7 @@ import android.media.MediaMuxer
 import android.net.Uri
 import android.os.SystemClock
 import android.util.Log
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -65,10 +70,16 @@ class MusicConverter(private val context: Context) {
         out.delete()
         scratch.delete()
         try {
-            val tags = readTags(track.uri)
-            val sourceUs = encode(track, scratch, onProgress)
-
+            val tags = shrinkPictures(readTags(track.uri))
             val comments = tags.comments + tags.pictures.map(OggOpus::pictureComment)
+            // Checked before the encode, which would otherwise be wasted. The vendor string is
+            // the encoder's and not known yet; it is a few dozen bytes.
+            val tagBytes = OggOpus.commentPacketSize("", comments) + VENDOR_ALLOWANCE
+            if (tagBytes > OggOpus.MAX_PACKET_BYTES) {
+                throw Problem("its tags are too large for Android to read (${tagBytes / 1024 / 1024} MB)")
+            }
+
+            val sourceUs = encode(track, scratch, onProgress)
             scratch.inputStream().buffered().use { input ->
                 out.outputStream().buffered().use { output -> OggOpus.retag(input, output, comments) }
             }
@@ -124,6 +135,58 @@ class MusicConverter(private val context: Context) {
             done += r
         }
         return out
+    }
+
+    // endregion
+
+    // region cover art
+
+    /**
+     * [tags] with each picture over [MAX_PICTURE_BYTES] re-encoded smaller; the rest are kept
+     * byte for byte.
+     *
+     * Pictures travel base64-encoded in the OpusTags packet, so anything much over 12 MB of art
+     * breaks [OggOpus.MAX_PACKET_BYTES] — and some albums carry 25 MB scans. A cover gains nothing
+     * from more than [MAX_PICTURE_SIDE] px anywhere it is shown.
+     */
+    private fun shrinkPictures(tags: Id3Tags.Tags): Id3Tags.Tags {
+        if (tags.pictures.none { it.data.size > MAX_PICTURE_BYTES }) return tags
+        return tags.copy(pictures = tags.pictures.map { if (it.data.size > MAX_PICTURE_BYTES) shrink(it) else it })
+    }
+
+    /** [picture] as a JPEG at most [MAX_PICTURE_SIDE] px on its long side, or as it was if that is no smaller. */
+    private fun shrink(picture: Id3Tags.Picture): Id3Tags.Picture {
+        val bitmap = try {
+            ImageDecoder.decodeBitmap(ImageDecoder.createSource(ByteBuffer.wrap(picture.data))) { decoder, info, _ ->
+                // Decoded straight to the target size, so a huge scan never needs its full-size bitmap.
+                val (w, h) = info.size.width to info.size.height
+                val scale = MAX_PICTURE_SIDE.toFloat() / maxOf(w, h)
+                if (scale < 1f) {
+                    decoder.setTargetSize((w * scale).roundToInt().coerceAtLeast(1), (h * scale).roundToInt().coerceAtLeast(1))
+                }
+                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not decode a ${picture.data.size}-byte ${picture.mime} picture", e)
+            throw Problem("its cover art (${picture.data.size / 1024 / 1024} MB) could not be read to shrink it")
+        }
+        try {
+            // JPEG has no alpha: flatten onto white, or transparent areas would come out black.
+            val opaque = if (!bitmap.hasAlpha()) bitmap else {
+                Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888).also {
+                    Canvas(it).apply { drawColor(Color.WHITE); drawBitmap(bitmap, 0f, 0f, null) }
+                }
+            }
+            val out = ByteArrayOutputStream()
+            opaque.compress(Bitmap.CompressFormat.JPEG, PICTURE_QUALITY, out)
+            if (opaque !== bitmap) opaque.recycle()
+            val data = out.toByteArray()
+            if (data.size >= picture.data.size) return picture
+            Log.i(TAG, "Cover art shrunk from ${picture.data.size} to ${data.size} bytes (${bitmap.width}x${bitmap.height})")
+            return picture.copy(mime = "image/jpeg", data = data)
+        } finally {
+            bitmap.recycle()
+        }
     }
 
     // endregion
@@ -454,6 +517,14 @@ class MusicConverter(private val context: Context) {
 
         /** Far beyond any real tag, cover art included; guards against a corrupt size field. */
         private const val MAX_TAG_BYTES = 64 * 1024 * 1024
+
+        /** Pictures up to this size are kept as they are; ordinary album art is well under it. */
+        private const val MAX_PICTURE_BYTES = 2 * 1024 * 1024
+        private const val MAX_PICTURE_SIDE = 2000
+        private const val PICTURE_QUALITY = 90
+
+        /** Room for the encoder's vendor string ("libopus 1.x", in practice) in the size check. */
+        private const val VENDOR_ALLOWANCE = 1024L
 
         private const val DURATION_SLACK_US = 250_000L
         private const val DURATION_SLACK_FRACTION = 0.005

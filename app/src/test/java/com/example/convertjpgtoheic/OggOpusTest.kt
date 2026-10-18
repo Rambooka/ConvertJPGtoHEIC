@@ -40,6 +40,17 @@ class OggOpusTest {
     private val audio = List(5) { i -> ByteArray(100 + i * 37) { (it * 7 + i).toByte() } }
 
     @Test
+    fun `comment packet size is predicted exactly`() {
+        val comments = listOf("TITLE" to "Café del Mar", "ARTIST" to "Ünïcødé", "EMPTY" to "")
+        for (c in listOf(emptyList(), comments)) {
+            assertEquals(
+                OggOpus.commentPacket("libopus 1.4", c).size.toLong(),
+                OggOpus.commentPacketSize("libopus 1.4", c),
+            )
+        }
+    }
+
+    @Test
     fun `retag writes the comments and leaves the audio alone`() {
         val comments = listOf("TITLE" to "Song", "ARTIST" to "Bjørk", "TRACKNUMBER" to "3")
         val out = ByteArrayOutputStream()
