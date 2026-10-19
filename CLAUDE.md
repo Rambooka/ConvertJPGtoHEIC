@@ -5,7 +5,9 @@ JPG/PNG → HEIC (`androidx.heifwriter`), H.264 → HEVC video, and MP3 / M4A (A
 music. Everything is published through MediaStore. Also repairs earlier output (photo dates and
 rotation, music years), cleans up leftovers (pictures, videos, songs) and deletes copy-protected
 `.m4p` songs. A **Dry run** switch (not saved; off at every launch) makes the three converters
-measure and discard instead.
+measure and discard instead. Options that apply to every run: folders to leave alone (`Android/`
+by default — other apps' media), trash instead of delete, keep the screen on, only while
+charging; runs always hold while the phone is too hot.
 
 ## Build and test
 
@@ -38,6 +40,21 @@ into the scratchpad, never into the repo.
 
 Branch **`fix/music-oversized-cover-art`**: 22 commits, pushed, **not merged to `main`** (the user
 has not chosen PR or direct merge). The earlier photo/video branch is merged.
+
+### Not yet on the phone
+
+`4bbfb6f` (the fresh-eyes batch: folder exclusions, HEIC read-back, trash, keep-screen-on,
+charging/heat holds, log viewer, PNG transparency count, .mov, app name) is built — both APKs —
+but a run was going, so it is **not installed** and its device tests have not run. Install both,
+run the tests, then check the first real run's log shows the read-back costing little.
+
+**WhatsApp (fixed by hand, 20 Oct):** the photo run had converted 17 pictures from
+`Android/media/com.whatsapp/…/WhatsApp Images/`, could not write the copies back there (the
+images collection refuses `Android/`), filed them under `Pictures/Android/media/…` and deleted
+the originals. The 18 HEICs were moved back into WhatsApp's folder with a shell script and
+re-indexed; WhatsApp's chat bubbles for them will still say the file is missing, since they
+reference `.jpg` names. `Android/` is excluded by default from now on. 128 WhatsApp JPGs remain
+untouched.
 
 ### Verified on the phone (20 Oct)
 
