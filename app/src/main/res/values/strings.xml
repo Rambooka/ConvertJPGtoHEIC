@@ -27,7 +27,7 @@
     <string name="action_dry_run">Dry run</string>
     <string name="action_dry_run_hint">Converts in memory to measure the real saving. Nothing is
         added to your gallery and no original is deleted.</string>
-    <string name="action_convert">Convert</string>
+    <string name="action_convert">Convert pictures to HEIC</string>
     <string name="action_cleanup">Clean up leftovers</string>
     <string name="action_cleanup_hint">Finds JPGs in this range that already have a HEIC beside
         them, and songs that already have their Opus copy — left behind by a run that was cancelled
