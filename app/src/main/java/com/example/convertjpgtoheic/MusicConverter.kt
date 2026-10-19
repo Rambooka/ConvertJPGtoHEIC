@@ -225,19 +225,14 @@ class MusicConverter(private val context: Context) {
      * @return the source's decoded length in microseconds, to check the result against.
      */
     private fun encode(track: SourceTrack, out: File, onProgress: (Float) -> Unit): Long {
-        val extractor = MediaExtractor()
+        var input: Input? = null
         var decoder: MediaCodec? = null
         var encoder: MediaCodec? = null
         var muxer: MediaMuxer? = null
         var muxerStarted = false
         try {
-            context.contentResolver.openFileDescriptor(track.uri, "r")?.use { extractor.setDataSource(it.fileDescriptor) }
-                ?: throw Problem("it could not be opened")
-            val index = (0 until extractor.trackCount).firstOrNull {
-                extractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
-            } ?: throw Problem("it has no sound track")
-            extractor.selectTrack(index)
-            val inFormat = extractor.getTrackFormat(index)
+            val source = openInput(track).also { input = it }
+            val inFormat = source.format
             val mime = inFormat.getString(MediaFormat.KEY_MIME)!!
             if (mime !in SOURCE_MIMES) throw Problem("it is $mime, not MP3, AAC or FLAC")
             val expectedUs = if (inFormat.containsKey(MediaFormat.KEY_DURATION)) {
@@ -246,7 +241,7 @@ class MusicConverter(private val context: Context) {
                 track.durationMs * 1000
             }
 
-            val dec = MediaCodec.createDecoderByType(mime).also { decoder = it }
+            val dec = createDecoder(mime).also { decoder = it }
             // 16-bit, which is all the pipeline takes: a 24-bit FLAC would otherwise come out of
             // the decoder as float. MP3 and AAC decoders give 16-bit regardless.
             inFormat.setInteger(MediaFormat.KEY_PCM_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
@@ -260,6 +255,10 @@ class MusicConverter(private val context: Context) {
             var inRate = 0
             var decodedFrames = 0L
             var queuedFrames = 0L
+            // For the per-song log line: where samples go missing, if they do.
+            var extractorSamples = 0
+            var lastSampleUs = -1L
+            var firstOutputUs = -1L
             var muxerTrack = -1
             var extractorDone = false
             var decoderDone = false
@@ -301,17 +300,18 @@ class MusicConverter(private val context: Context) {
             while (!encoderDone) {
                 var moved = false
 
-                // Compressed MP3 frames into the decoder.
+                // Compressed frames into the decoder.
                 while (!extractorDone) {
                     val i = dec.dequeueInputBuffer(0)
                     if (i < 0) break
-                    val n = extractor.readSampleData(dec.getInputBuffer(i)!!, 0)
+                    val n = source.read(dec.getInputBuffer(i)!!)
                     if (n < 0) {
                         dec.queueInputBuffer(i, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                         extractorDone = true
                     } else {
-                        dec.queueInputBuffer(i, 0, n, extractor.sampleTime, 0)
-                        extractor.advance()
+                        lastSampleUs = source.timeUs
+                        extractorSamples++
+                        dec.queueInputBuffer(i, 0, n, lastSampleUs, 0)
                     }
                     moved = true
                 }
@@ -326,6 +326,7 @@ class MusicConverter(private val context: Context) {
                     } else if (i >= 0) {
                         if (encoder == null) setUp(dec.outputFormat)
                         if (info.size > 0) {
+                            if (firstOutputUs < 0) firstOutputUs = info.presentationTimeUs
                             val buf = dec.getOutputBuffer(i)!!
                             buf.position(info.offset).limit(info.offset + info.size)
                             val frames = info.size / (2 * channels)
@@ -414,7 +415,23 @@ class MusicConverter(private val context: Context) {
             if (!muxerStarted) throw Problem("the encoder produced nothing")
             muxer!!.stop()
             muxerStarted = false
-            return decodedFrames * 1_000_000 / inRate
+            val decodedUs = decodedFrames * 1_000_000 / inRate
+            Log.i(
+                TAG,
+                "${track.displayName}: ${dec.name} · $extractorSamples frames in, last at ${lastSampleUs / 1000} ms · " +
+                    "$decodedFrames samples out from ${firstOutputUs / 1000} ms = ${decodedUs / 1000} ms · " +
+                    "file says ${expectedUs / 1000} ms",
+            )
+            // The copy is later checked against what was decoded, so what was decoded has to be the
+            // whole song: Samsung's FLAC extractor once ended streams up to 47 s early, unnoticed.
+            val exact = (source as? FlacInput)?.totalSamples?.takeIf { it > 0 }
+            if (exact != null && decodedFrames != exact) {
+                throw Problem("only $decodedFrames of its $exact samples could be decoded")
+            }
+            if (expectedUs > 0 && decodedUs < expectedUs - maxOf(LENGTH_SLACK_US, expectedUs / LENGTH_SLACK_DIVISOR)) {
+                throw Problem("only %.1f s of its %.1f s could be decoded".format(decodedUs / 1e6, expectedUs / 1e6))
+            }
+            return decodedUs
         } finally {
             runCatching { if (muxerStarted) muxer?.stop() }
             runCatching { muxer?.release() }
@@ -422,8 +439,113 @@ class MusicConverter(private val context: Context) {
             runCatching { encoder?.release() }
             runCatching { decoder?.stop() }
             runCatching { decoder?.release() }
-            runCatching { extractor.release() }
+            runCatching { input?.close() }
         }
+    }
+
+    /** Compressed frames for the decoder: the platform's extractor's, or for FLAC, [FlacFrames]'. */
+    private interface Input : AutoCloseable {
+        val format: MediaFormat
+
+        /** Writes the next frame into [into] from its start: its size, or -1 at the end. Its time is then [timeUs]. */
+        fun read(into: ByteBuffer): Int
+
+        val timeUs: Long
+    }
+
+    private fun openInput(track: SourceTrack): Input {
+        val pfd = context.contentResolver.openFileDescriptor(track.uri, "r") ?: throw Problem("it could not be opened")
+        try {
+            val src = FdSource(pfd.fileDescriptor, pfd.statSize)
+            if (src.size >= 4 && FlacTags.isFlac(src.read(0, 4))) return FlacInput(pfd, src)
+            val extractor = MediaExtractor()
+            try {
+                extractor.setDataSource(pfd.fileDescriptor)
+                val index = (0 until extractor.trackCount).firstOrNull {
+                    extractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
+                } ?: throw Problem("it has no sound track")
+                extractor.selectTrack(index)
+                return ExtractorInput(extractor, extractor.getTrackFormat(index))
+            } catch (e: Exception) {
+                extractor.release()
+                throw e
+            } finally {
+                pfd.close() // the extractor holds its own duplicate
+            }
+        } catch (e: Exception) {
+            runCatching { pfd.close() }
+            throw e
+        }
+    }
+
+    private class ExtractorInput(private val extractor: MediaExtractor, override val format: MediaFormat) : Input {
+        override var timeUs = 0L
+            private set
+
+        override fun read(into: ByteBuffer): Int {
+            val n = extractor.readSampleData(into, 0)
+            if (n >= 0) {
+                timeUs = extractor.sampleTime
+                extractor.advance()
+            }
+            return n
+        }
+
+        override fun close() = extractor.release()
+    }
+
+    /** A FLAC read frame by frame with [FlacFrames], every frame checked, none missed. */
+    private inner class FlacInput(private val pfd: android.os.ParcelFileDescriptor, src: FdSource) : Input {
+        private val info: FlacFrames.StreamInfo
+        private val reader: FlacFrames.Reader
+        val totalSamples: Long get() = info.totalSamples
+
+        init {
+            val (streamInfo, start) = FlacFrames.open(src) ?: throw Problem("its FLAC header could not be read")
+            info = streamInfo
+            reader = FlacFrames.Reader(src, info, start)
+        }
+
+        override val format: MediaFormat = MediaFormat.createAudioFormat(
+            MediaFormat.MIMETYPE_AUDIO_FLAC, info.sampleRate, info.channels,
+        ).apply {
+            setByteBuffer("csd-0", ByteBuffer.wrap(FlacFrames.codecConfig(info)))
+            setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, if (info.maxFrameSize > 0) info.maxFrameSize + 1024 else FLAC_INPUT_FALLBACK)
+            if (info.totalSamples > 0) setLong(MediaFormat.KEY_DURATION, info.totalSamples * 1_000_000 / info.sampleRate)
+        }
+
+        override var timeUs = 0L
+            private set
+
+        override fun read(into: ByteBuffer): Int {
+            val frame = try {
+                reader.next() ?: return -1
+            } catch (e: FlacFrames.FormatException) {
+                throw Problem("its FLAC frames could not be read (${e.message})")
+            }
+            if (frame.length > into.capacity()) throw Problem("a FLAC frame (${frame.length} bytes) is larger than the decoder takes")
+            into.clear()
+            into.put(reader.bytes(frame))
+            timeUs = frame.firstSample * 1_000_000 / info.sampleRate
+            return frame.length
+        }
+
+        override fun close() = pfd.close()
+    }
+
+    /**
+     * The decoder for [mime]: the platform's own for FLAC, the device's default for the rest.
+     *
+     * [FlacInput] feeds it what the platform's FLAC decoder is written for: STREAMINFO as its
+     * configuration, then one whole frame per buffer. Samsung's decoder is only known to have been
+     * fed by Samsung's extractor, which is the part found losing audio.
+     */
+    private fun createDecoder(mime: String): MediaCodec {
+        if (mime == MediaFormat.MIMETYPE_AUDIO_FLAC) {
+            runCatching { return MediaCodec.createByCodecName(AOSP_FLAC_DECODER) }
+                .onFailure { Log.w(TAG, "$AOSP_FLAC_DECODER unavailable; using the default", it) }
+        }
+        return MediaCodec.createDecoderByType(mime)
     }
 
     /** Float samples to 16-bit PCM in the platform's byte order, which is what MediaCodec expects. */
@@ -528,6 +650,15 @@ class MusicConverter(private val context: Context) {
         private val SOURCE_MIMES = setOf(
             MediaFormat.MIMETYPE_AUDIO_MPEG, MediaFormat.MIMETYPE_AUDIO_AAC, MediaFormat.MIMETYPE_AUDIO_FLAC,
         )
+
+        private const val AOSP_FLAC_DECODER = "c2.android.flac.decoder"
+
+        /** Decoder input size for a FLAC whose STREAMINFO does not give its largest frame. */
+        private const val FLAC_INPUT_FALLBACK = 1024 * 1024
+
+        /** How much shorter than its container says a decode may come out: 1 s or 2%, whichever is more. */
+        private const val LENGTH_SLACK_US = 1_000_000L
+        private const val LENGTH_SLACK_DIVISOR = 50
 
         private const val OPUS_RATE = 48_000
         private const val OPUS_COMPLEXITY = 10
