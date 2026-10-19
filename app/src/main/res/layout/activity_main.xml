@@ -213,19 +213,26 @@
             android:visibility="gone"
             tools:visibility="visible" />
 
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="@string/action_videos_hint"
+            android:textAppearance="?attr/textAppearanceBodySmall" />
+
         <com.google.android.material.button.MaterialButton
             android:id="@+id/videoButton"
             style="@style/Widget.Material3.Button.OutlinedButton"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="4dp"
             android:text="@string/action_videos" />
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="@string/action_videos_hint"
+            android:layout_marginTop="16dp"
+            android:text="@string/action_music_hint"
             android:textAppearance="?attr/textAppearanceBodySmall" />
 
         <com.google.android.material.button.MaterialButton
@@ -233,14 +240,14 @@
             style="@style/Widget.Material3.Button.OutlinedButton"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="4dp"
             android:text="@string/action_music" />
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="@string/action_music_hint"
+            android:layout_marginTop="16dp"
+            android:text="@string/action_repair_hint"
             android:textAppearance="?attr/textAppearanceBodySmall" />
 
         <com.google.android.material.button.MaterialButton
@@ -248,14 +255,14 @@
             style="@style/Widget.Material3.Button.OutlinedButton"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="4dp"
             android:text="@string/action_repair" />
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="@string/action_repair_hint"
+            android:layout_marginTop="16dp"
+            android:text="@string/action_music_repair_hint"
             android:textAppearance="?attr/textAppearanceBodySmall" />
 
         <com.google.android.material.button.MaterialButton
@@ -263,14 +270,14 @@
             style="@style/Widget.Material3.Button.OutlinedButton"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="4dp"
             android:text="@string/action_music_repair" />
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="@string/action_music_repair_hint"
+            android:layout_marginTop="16dp"
+            android:text="@string/action_delete_protected_hint"
             android:textAppearance="?attr/textAppearanceBodySmall" />
 
         <com.google.android.material.button.MaterialButton
@@ -278,14 +285,14 @@
             style="@style/Widget.Material3.Button.OutlinedButton"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="4dp"
             android:text="@string/action_delete_protected" />
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="@string/action_delete_protected_hint"
+            android:layout_marginTop="16dp"
+            android:text="@string/action_cleanup_hint"
             android:textAppearance="?attr/textAppearanceBodySmall" />
 
         <com.google.android.material.button.MaterialButton
@@ -293,15 +300,8 @@
             style="@style/Widget.Material3.Button.OutlinedButton"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:text="@string/action_cleanup" />
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
-            android:text="@string/action_cleanup_hint"
-            android:textAppearance="?attr/textAppearanceBodySmall" />
+            android:text="@string/action_cleanup" />
 
         <!-- Progress -->
         <com.google.android.material.progressindicator.LinearProgressIndicator
