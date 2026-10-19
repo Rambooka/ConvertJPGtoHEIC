@@ -112,6 +112,34 @@ object OggOpus {
         return vendor to out
     }
 
+    /**
+     * Whether [a] and [b] carry the same OpusHead and the same audio, page for page: everything
+     * apart from the tags, which [retag] replaces, and the sequence numbers and checksums, which
+     * it renumbers. What a repair checks before a rewritten copy may replace the original.
+     */
+    fun sameAudio(a: InputStream, b: InputStream): Boolean {
+        val headA = readPage(a) ?: return false
+        val headB = readPage(b) ?: return false
+        if (!headA.body.contentEquals(headB.body)) return false
+        skipTags(a)
+        skipTags(b)
+        while (true) {
+            val pa = readPage(a)
+            val pb = readPage(b)
+            if (pa == null || pb == null) return pa == null && pb == null
+            if (pa.headerType != pb.headerType || pa.granule != pb.granule || pa.serial != pb.serial ||
+                !pa.lacing.contentEquals(pb.lacing) || !pa.body.contentEquals(pb.body)
+            ) return false
+        }
+    }
+
+    private fun skipTags(input: InputStream) {
+        while (true) {
+            val page = readPage(input) ?: throw FormatException("no OpusTags packet")
+            if (page.endsPacket) return
+        }
+    }
+
     /** The OpusTags packet: magic, vendor, then each comment as `KEY=value`. */
     fun commentPacket(vendor: String, comments: List<Pair<String, String>>): ByteArray {
         val out = ByteArrayOutputStream()

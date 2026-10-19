@@ -148,6 +148,22 @@ This frees
     <string name="progress_repair_checking">Checking %1$d of %2$d\n%3$s\nDates fixed: %4$d · Rotation fixed: %5$d\nWaiting for your permission: %6$d</string>
     <string name="progress_repair_writing">Repairing %1$d of %2$d\n%3$s\nDates fixed: %4$d · Rotation fixed: %5$d</string>
     <string name="progress_repair_refreshing">Refreshing the gallery: %1$d of %2$d photos\nAndroid is re-reading each repaired photo so the gallery shows the fix. Keep the app open until this finishes.</string>
+    <string name="action_music_repair">Repair converted music files</string>
+    <string name="action_music_repair_hint">Adds the year to songs already converted to Opus, so
+        music apps show it — it was stored where Android does not look. Only the tags are rewritten;
+        the sound is copied exactly.</string>
+    <string name="music_repair_title">Repair converted music files?</string>
+    <string name="music_repair_message">This checks every .opus song on the phone and gives each
+        one the year tag Android\'s music library reads, taken from the date already in its tags.\n\n
+        The sound is copied exactly, and each file is checked against the original before it is
+        replaced. Android will ask you to allow the changes for any songs this app does not own.</string>
+    <string name="progress_music_repair_checking">Checking %1$d of %2$d\n%3$s\nYears added: %4$d\nWaiting for your permission: %5$d</string>
+    <string name="progress_music_repair_writing">Repairing %1$d of %2$d\n%3$s\nYears added: %4$d</string>
+    <string name="progress_music_repair_refreshing">Refreshing the music library: %1$d of %2$d songs\nAndroid is re-reading each repaired song so music apps show the year. Keep the app open until this finishes.</string>
+    <plurals name="awaiting_music_repair_access">
+        <item quantity="one">Waiting for you to allow the repair of %1$d song.</item>
+        <item quantity="other">Waiting for you to allow the repair of %1$d songs.</item>
+    </plurals>
     <string name="eta_line">About %1$s left · done around %2$s</string>
     <string name="eta_estimating">Working out how long this will take…</string>
     <plurals name="awaiting_repair_access">

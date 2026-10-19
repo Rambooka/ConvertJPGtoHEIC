@@ -86,6 +86,16 @@ data class HeicRow(
     val path: String?,
 )
 
+/** An Opus song in the music library, as the music repair needs it. */
+data class OpusRow(
+    val uri: Uri,
+    val id: Long,
+    val displayName: String,
+    val sizeBytes: Long,
+    /** Filesystem path, used only to ask the scanner to re-read the file. */
+    val path: String?,
+)
+
 /** What MediaStore currently says about a file's date and orientation. */
 data class CaptureState(val dateTakenMs: Long?, val orientation: Int)
 
@@ -732,6 +742,50 @@ class PhotoRepository(private val context: Context) {
             val opus = opusDurations[expected] ?: return@filter false
             kotlin.math.abs(opus - mp3.durationMs) <= maxOf(DURATION_MATCH_TOLERANCE_MS, mp3.durationMs / 100)
         }
+    }
+
+    /** Every `.opus` in the music library, folder by folder: what the music repair looks through. */
+    fun queryOpus(): List<OpusRow> {
+        val projection = arrayOf(
+            MediaStore.Audio.Media._ID,
+            MediaStore.Audio.Media.DISPLAY_NAME,
+            MediaStore.Audio.Media.SIZE,
+            @Suppress("DEPRECATION") MediaStore.Audio.Media.DATA,
+        )
+        val rows = ArrayList<OpusRow>()
+        resolver.query(
+            audioCollection, projection, "${MediaStore.Audio.Media.DISPLAY_NAME} LIKE ?", arrayOf("%.opus"),
+            "${MediaStore.Audio.Media.RELATIVE_PATH} ASC, ${MediaStore.Audio.Media.DISPLAY_NAME} ASC",
+        )?.use { c ->
+            while (c.moveToNext()) {
+                val id = c.getLong(0)
+                rows += OpusRow(
+                    uri = ContentUris.withAppendedId(audioCollection, id),
+                    id = id,
+                    displayName = c.getString(1) ?: continue,
+                    sizeBytes = c.getLong(2),
+                    path = c.getString(3),
+                )
+            }
+        }
+        return rows
+    }
+
+    /** The year MediaStore currently shows for each song in [ids]; absent or null when it shows none. */
+    fun musicYears(ids: Collection<Long>): Map<Long, Int?> {
+        val out = HashMap<Long, Int?>()
+        for (chunk in ids.chunked(QUERY_CHUNK)) {
+            resolver.query(
+                audioCollection,
+                arrayOf(MediaStore.Audio.Media._ID, MediaStore.Audio.Media.YEAR),
+                "${MediaStore.Audio.Media._ID} IN (${chunk.joinToString(",") { "?" }})",
+                chunk.map { it.toString() }.toTypedArray(),
+                null,
+            )?.use { c ->
+                while (c.moveToNext()) out[c.getLong(0)] = c.getLongOrNull(1)?.toInt()?.takeIf { it > 0 }
+            }
+        }
+        return out
     }
 
     /**

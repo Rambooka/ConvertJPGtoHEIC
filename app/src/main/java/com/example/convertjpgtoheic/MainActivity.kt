@@ -121,6 +121,7 @@ class MainActivity : AppCompatActivity() {
         binding.repairButton.setOnClickListener { confirmThenRepair() }
         binding.videoButton.setOnClickListener { confirmThenConvertVideos() }
         binding.musicButton.setOnClickListener { confirmThenConvertMusic() }
+        binding.musicRepairButton.setOnClickListener { confirmThenRepairMusic() }
         binding.cancelButton.setOnClickListener { engine.cancel() }
 
         binding.qualitySlider.addOnChangeListener { _, value, _ ->
@@ -335,6 +336,21 @@ class MainActivity : AppCompatActivity() {
         append(etaText(p.remainingMs))
     }
 
+    private fun musicRepairStatus(p: RunProgress): String = buildString {
+        appendLine(
+            when (p.repairPhase) {
+                RepairPhase.REFRESHING -> getString(R.string.progress_music_repair_refreshing, p.done, p.total)
+                RepairPhase.WRITING ->
+                    getString(R.string.progress_music_repair_writing, p.done + 1, p.total, p.currentName, p.repairedDates)
+                else -> getString(
+                    R.string.progress_music_repair_checking,
+                    p.done + 1, p.total, p.currentName, p.repairedDates, p.awaitingPermission,
+                )
+            }
+        )
+        append(etaText(p.remainingMs))
+    }
+
     /** "About 12 min left · done around 6:40 pm", in the phone's own 12/24-hour style. */
     private fun etaText(remainingMs: Long?): String {
         if (remainingMs == null) return getString(R.string.eta_estimating)
@@ -423,7 +439,11 @@ class MainActivity : AppCompatActivity() {
     private fun startRun(mode: RunMode) {
         // A repair and a music run cover the whole library, so they are the runs that need no range.
         val current = range?.takeIf { it.isValid }
-            ?: if (mode == RunMode.REPAIR || mode == RunMode.MUSIC) DateRange(0L, Long.MAX_VALUE) else null
+            ?: if (mode == RunMode.REPAIR || mode == RunMode.MUSIC || mode == RunMode.MUSIC_REPAIR) {
+                DateRange(0L, Long.MAX_VALUE)
+            } else {
+                null
+            }
         if (current == null) {
             binding.statusText.setText(R.string.pick_range_first)
             return
@@ -570,6 +590,21 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    /** Repairs the tags of every converted song; like the music run, the range does not apply. */
+    private fun confirmThenRepairMusic() {
+        if (!granted(readAudioPermission())) {
+            binding.statusText.setText(R.string.music_need_permission)
+            permissionLauncher.launch(arrayOf(readAudioPermission()))
+            return
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.music_repair_title)
+            .setMessage(R.string.music_repair_message)
+            .setPositiveButton(R.string.action_repair_button) { _, _ -> startRun(RunMode.MUSIC_REPAIR) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
     private fun confirmThenRepair() {
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.repair_title)
@@ -616,6 +651,7 @@ class MainActivity : AppCompatActivity() {
         binding.videoButton.isEnabled = usable && EncoderSupport.hasHevcEncoder
         // Music needs neither photo access nor a range, only its own permission (asked on tap).
         binding.musicButton.isEnabled = !busy && EncoderSupport.hasOpusEncoder
+        binding.musicRepairButton.isEnabled = !busy
         binding.rangeButton.isEnabled = !busy
         binding.cancelButton.isVisible(state is UiState.Working || state is UiState.AwaitingDeletion)
         binding.progressBar.isVisible(busy)
@@ -655,6 +691,7 @@ class MainActivity : AppCompatActivity() {
                 binding.statusText.text = when (state.mode) {
                     RunMode.CLEAN_UP -> getString(R.string.progress_cleanup)
                     RunMode.REPAIR -> repairStatus(state.progress)
+                    RunMode.MUSIC_REPAIR -> musicRepairStatus(state.progress)
                     RunMode.VIDEO -> videoStatus(state.progress)
                     RunMode.MUSIC -> musicStatus(state.progress)
                     RunMode.DRY_RUN -> runningStatus(state.progress, R.string.progress_measuring)
@@ -669,6 +706,7 @@ class MainActivity : AppCompatActivity() {
                 binding.statusText.text = resources.getQuantityString(
                     when {
                         state.mode == RunMode.REPAIR -> R.plurals.awaiting_repair_access
+                        state.mode == RunMode.MUSIC_REPAIR -> R.plurals.awaiting_music_repair_access
                         state.mode == RunMode.VIDEO -> R.plurals.awaiting_video_deletion
                         state.mode == RunMode.MUSIC -> R.plurals.awaiting_music_deletion
                         state.lowOnSpace -> R.plurals.awaiting_deletion_low_space
@@ -696,6 +734,7 @@ class MainActivity : AppCompatActivity() {
             RunMode.CONVERT -> "Conversion"
             RunMode.CLEAN_UP -> "Clean-up"
             RunMode.REPAIR -> "Repair"
+            RunMode.MUSIC_REPAIR -> "Music repair"
             RunMode.VIDEO -> "Video conversion"
             RunMode.MUSIC -> "Music conversion"
         }
@@ -708,6 +747,10 @@ class MainActivity : AppCompatActivity() {
         }
         if (report.mode == RunMode.REPAIR) {
             describeRepair(report)
+            return@buildString
+        }
+        if (report.mode == RunMode.MUSIC_REPAIR) {
+            describeMusicRepair(report)
             return@buildString
         }
         if (report.mode == RunMode.VIDEO) {
@@ -889,6 +932,22 @@ class MainActivity : AppCompatActivity() {
             )
         )
         append(etaText(p.remainingMs))
+    }
+
+    private fun StringBuilder.describeMusicRepair(report: RunReport) {
+        appendLine("Songs checked:     ${report.repairChecked}")
+        appendLine("Years added:       ${report.musicYearsFixed}")
+        if (report.musicNoDate > 0) appendLine("No date in tags:   ${report.musicNoDate} (nothing to take a year from)")
+        if (report.repairDeclined > 0) appendLine("Not allowed:       ${report.repairDeclined} (left as they were)")
+        if (report.repairUnverified > 0) {
+            appendLine("Not yet showing:   ${report.repairUnverified} (rewritten; music apps may catch up after a rescan)")
+        }
+        if (report.musicYearsFixed == 0 && report.repairUnverified == 0 && report.failureCount == 0 &&
+            report.repairDeclined == 0 && !report.cancelled
+        ) {
+            appendLine()
+            appendLine("Nothing needed fixing.")
+        }
     }
 
     private fun StringBuilder.describeRepair(report: RunReport) {

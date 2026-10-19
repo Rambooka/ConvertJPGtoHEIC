@@ -109,6 +109,8 @@ class ConversionService : Service() {
                         buildNotification(
                             text = if (state.mode == RunMode.REPAIR) {
                                 "Allow the repair of ${state.pending} photos"
+                            } else if (state.mode == RunMode.MUSIC_REPAIR) {
+                                "Allow the repair of ${state.pending} songs"
                             } else if (state.mode == RunMode.VIDEO) {
                                 "Confirm deleting ${state.pending} original videos"
                             } else if (state.mode == RunMode.MUSIC) {
@@ -159,6 +161,8 @@ class ConversionService : Service() {
             report.mode == RunMode.REPAIR && report.cancelled -> "Repair cancelled"
             report.mode == RunMode.REPAIR ->
                 "Repaired: ${report.repairedDates} dates, ${report.repairedRotations} rotations"
+            report.mode == RunMode.MUSIC_REPAIR && report.cancelled -> "Music repair cancelled"
+            report.mode == RunMode.MUSIC_REPAIR -> "Repaired music: ${report.musicYearsFixed} years added"
             report.mode == RunMode.VIDEO && report.cancelled -> "Video conversion cancelled"
             report.mode == RunMode.VIDEO -> "Converted ${report.converted} videos"
             report.mode == RunMode.MUSIC && report.cancelled -> "Music conversion cancelled"
@@ -215,6 +219,7 @@ class ConversionService : Service() {
                 RunMode.DRY_RUN -> "Measuring photos"
                 RunMode.CLEAN_UP -> "Finding leftovers"
                 RunMode.REPAIR -> "Repairing photos"
+                RunMode.MUSIC_REPAIR -> "Repairing music"
                 RunMode.VIDEO -> "Converting videos"
                 RunMode.MUSIC -> "Converting music"
                 RunMode.CONVERT -> "Converting photos"

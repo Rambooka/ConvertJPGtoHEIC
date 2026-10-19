@@ -40,6 +40,12 @@ enum class RunMode {
     VIDEO,
 
     /**
+     * Fix the tags of `.opus` files the music conversion already made — the `YEAR` Android's
+     * music library needs. Rewrites the tags only; the audio is copied untouched. See [MusicRepair].
+     */
+    MUSIC_REPAIR,
+
+    /**
      * Re-encode the music library's MP3s as Opus in `.opus` files, keep each only if it is smaller,
      * then offer to delete the MP3s. See [MusicConverter].
      */
@@ -242,6 +248,10 @@ data class RunReport(
     val musicNotSmaller: Int = 0,
     /** Music runs only: earlier `.ogg` copies renamed to `.opus`. */
     val musicRenamed: Int = 0,
+    /** Music repair runs only: songs given a year the music library now shows. */
+    val musicYearsFixed: Int = 0,
+    /** Music repair runs only: no year anywhere in the tags to give them. */
+    val musicNoDate: Int = 0,
     /** Clean-up runs only: leftovers found, by kind; [deletedOriginals] is how many went. */
     val leftoverJpgs: Int = 0,
     val leftoverMp3s: Int = 0,
@@ -368,6 +378,7 @@ class ConversionEngine private constructor(context: Context) {
     private val videoStaging = File(app.cacheDir, "video-staging")
     private val musicConverter = MusicConverter(app)
     private val musicStaging = File(app.cacheDir, "music-staging")
+    private val musicRepairer = MusicRepair(app.contentResolver, musicStaging)
     /**
      * The handler is not optional. A revoked photo permission makes `ContentResolver.query` throw
      * SecurityException, and an uncaught throw from `launch` reaches the thread's default handler
@@ -486,6 +497,7 @@ class ConversionEngine private constructor(context: Context) {
             when (mode) {
                 RunMode.CLEAN_UP -> cleanUp(options)
                 RunMode.REPAIR -> repair()
+                RunMode.MUSIC_REPAIR -> repairMusic()
                 RunMode.VIDEO -> convertVideos(options)
                 RunMode.MUSIC -> convertMusic(options)
                 else -> convert(mode, options)
@@ -1468,6 +1480,116 @@ class ConversionEngine private constructor(context: Context) {
                 repairedDates = verified.dates,
                 repairedRotations = verified.rotations,
                 repairUnverified = verified.unverified,
+            )
+        )
+    }
+
+    /**
+     * Gives converted songs the `YEAR` tag Android's music library needs, as [repair] does dates
+     * for photos: fix what the app owns as it goes, ask once for the rest, then confirm MediaStore
+     * shows the year — rescanning whatever it has not picked up on its own.
+     */
+    private suspend fun repairMusic() {
+        val mode = RunMode.MUSIC_REPAIR
+        val rows = repository.queryOpus()
+        if (rows.isEmpty()) {
+            _state.value = UiState.Finished(RunReport(mode))
+            return
+        }
+
+        var tally = RunReport(mode)
+        val repaired = ArrayList<OpusRow>()
+        val needsAccess = ArrayList<Pair<OpusRow, MusicRepair.Diagnosis.Needs>>()
+
+        fun progress(phase: RepairPhase, done: Int, total: Int, name: String, eta: Eta) {
+            _state.value = UiState.Working(
+                mode,
+                RunProgress(
+                    done = done,
+                    total = total,
+                    currentName = name,
+                    failures = tally.failureCount,
+                    repairedDates = repaired.size,
+                    repairPhase = phase,
+                    awaitingPermission = needsAccess.size,
+                    remainingMs = eta.remainingMs(done),
+                ),
+            )
+        }
+
+        fun applyOne(row: OpusRow, fix: MusicRepair.Diagnosis.Needs) {
+            when (val outcome = musicRepairer.apply(row.uri, row.displayName, fix)) {
+                MusicRepair.Outcome.Repaired -> repaired += row
+                is MusicRepair.Outcome.Failed -> {
+                    Log.i(TAG, "Could not repair ${row.displayName}: ${outcome.reason}")
+                    tally = tally.withFailure(row.uri, row.displayName, row.sizeBytes, outcome.reason)
+                }
+            }
+        }
+
+        val checking = Eta(rows.size)
+        for ((index, row) in rows.withIndex()) {
+            if (cancelRequested) break
+            progress(RepairPhase.CHECKING, index, rows.size, row.displayName, checking)
+            when (val diagnosis = musicRepairer.diagnose(row.uri)) {
+                MusicRepair.Diagnosis.Fine -> Unit
+                MusicRepair.Diagnosis.NoDate -> tally = tally.copy(musicNoDate = tally.musicNoDate + 1)
+                is MusicRepair.Diagnosis.Cannot -> {
+                    Log.i(TAG, "Cannot repair ${row.displayName}: ${diagnosis.reason}")
+                    tally = tally.withFailure(row.uri, row.displayName, row.sizeBytes, diagnosis.reason)
+                }
+                is MusicRepair.Diagnosis.Needs -> try {
+                    applyOne(row, diagnosis)
+                } catch (_: SecurityException) {
+                    needsAccess += row to diagnosis
+                }
+            }
+            tally = tally.copy(repairChecked = index + 1)
+        }
+
+        if (needsAccess.isNotEmpty() && !cancelRequested) {
+            _state.value = UiState.AwaitingDeletion(mode, tally.repairChecked, rows.size, needsAccess.size)
+            val answer = confirmConsent(needsAccess.map { it.first.uri }, ConsentKind.MODIFY)
+            val allowed = answer.accepted.toHashSet()
+            var declined = 0
+            val writing = Eta(needsAccess.size)
+            for ((index, pair) in needsAccess.withIndex()) {
+                if (cancelRequested) break
+                val (row, fix) = pair
+                progress(RepairPhase.WRITING, index, needsAccess.size, row.displayName, writing)
+                if (row.uri !in allowed) {
+                    declined++
+                    continue
+                }
+                try {
+                    applyOne(row, fix)
+                } catch (_: SecurityException) {
+                    tally = tally.withFailure(row.uri, row.displayName, row.sizeBytes, "access was not granted")
+                }
+            }
+            tally = tally.copy(repairDeclined = declined)
+        }
+
+        // MediaProvider rescans a file that grew when its writer closes it, mostly; anything not
+        // yet showing a year goes to the scanner explicitly.
+        var years = repository.musicYears(repaired.map { it.id })
+        val stale = repaired.filter { years[it.id] == null }
+        if (stale.isNotEmpty() && !cancelRequested) {
+            val eta = Eta(stale.size)
+            progress(RepairPhase.REFRESHING, 0, stale.size, "", eta)
+            repository.scanFiles(stale.mapNotNull { it.path }) { scanned ->
+                if (cancelRequested) return@scanFiles false
+                progress(RepairPhase.REFRESHING, scanned, stale.size, "", eta)
+                true
+            }
+            years = repository.musicYears(repaired.map { it.id })
+        }
+        val showing = repaired.count { years[it.id] != null }
+        _state.value = UiState.Finished(
+            tally.copy(
+                cancelled = cancelRequested,
+                musicYearsFixed = showing,
+                repairUnverified = repaired.size - showing,
             )
         )
     }
