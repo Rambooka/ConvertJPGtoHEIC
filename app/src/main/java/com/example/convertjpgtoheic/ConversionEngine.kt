@@ -267,6 +267,7 @@ data class RunReport(
     val dryRun: Boolean = false,
     /** Clean-up runs only: leftovers found, by kind; [deletedOriginals] is how many went. */
     val leftoverJpgs: Int = 0,
+    val leftoverVideos: Int = 0,
     val leftoverMp3s: Int = 0,
 ) {
     /**
@@ -1010,29 +1011,42 @@ class ConversionEngine private constructor(context: Context) {
     // region clean up
 
     /**
-     * Removes the leftovers of interrupted runs: JPGs in the range that already have a HEIC beside
-     * them, and MP3s (any date — music has no capture date) that already have their `.opus`.
+     * Removes the leftovers of interrupted runs, each original only where its converted copy is
+     * already beside it: JPGs and PNGs in the range with a HEIC, videos in the range with an
+     * `_HEVC.mp4` (which then takes the original's name, as the video run does), and songs of any
+     * date — music has no capture date — with their `.opus`.
      */
     private suspend fun cleanUp(options: RunOptions) {
-        val stranded = repository.findStrandedOriginals(DateRange(options.startMs, options.endMs))
+        val range = DateRange(options.startMs, options.endMs)
+        val stranded = repository.findStrandedOriginals(range)
+        val strandedVideos = if (cancelRequested) emptyList() else repository.findStrandedVideos(range)
         val strandedMp3s = if (cancelRequested) emptyList() else repository.findStrandedMp3s()
         if (cancelRequested) {
             _state.value = UiState.Finished(RunReport(RunMode.CLEAN_UP, cancelled = true))
             return
         }
-        val total = stranded.size + strandedMp3s.size
+        val total = stranded.size + strandedVideos.size + strandedMp3s.size
         if (total == 0) {
             _state.value = UiState.Finished(RunReport(RunMode.CLEAN_UP))
             return
         }
 
         _state.value = UiState.AwaitingDeletion(RunMode.CLEAN_UP, 0, total, total)
-        val answer = confirmDeletion(stranded.map { it.uri } + strandedMp3s.map { it.uri })
+        val answer = confirmDeletion(
+            stranded.map { it.uri } + strandedVideos.map { it.first.uri } + strandedMp3s.map { it.uri }
+        )
+        // Only once its original is really gone may a copy take the original's name.
+        val gone = answer.accepted.toHashSet()
+        for ((video, copy) in strandedVideos) {
+            if (video.uri in gone) repository.renameVideo(copy, video.displayName)
+        }
         _state.value = UiState.Finished(
             RunReport(
                 RunMode.CLEAN_UP,
-                originalBytes = stranded.sumOf { it.sizeBytes } + strandedMp3s.sumOf { it.sizeBytes },
+                originalBytes = stranded.sumOf { it.sizeBytes } + strandedVideos.sumOf { it.first.sizeBytes } +
+                    strandedMp3s.sumOf { it.sizeBytes },
                 leftoverJpgs = stranded.size,
+                leftoverVideos = strandedVideos.size,
                 leftoverMp3s = strandedMp3s.size,
                 deletedOriginals = answer.deleted,
                 deletionOutcome = if (answer.granted) {

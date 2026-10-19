@@ -643,6 +643,51 @@ class PhotoRepository(private val context: Context) {
         }
     }
 
+    /**
+     * Videos in the range whose `_HEVC.mp4` copy is still beside them — the video run's delete
+     * prompt was declined or the run was cancelled, so the original was never removed and the copy
+     * never took its name. Paired with that copy's URI, to rename once the original goes.
+     *
+     * As with photos and songs, a name match alone does not justify deleting: the copy must also be
+     * non-empty and run as long as the original.
+     */
+    fun findStrandedVideos(range: DateRange): List<Pair<SourceVideo, Uri>> {
+        val suffix = SourceVideo.CONVERTED_SUFFIX + ".mp4"
+        val originals = queryVideos(range.startMs, range.endMs).filterNot { it.displayName.endsWith(suffix, ignoreCase = true) }
+        if (originals.isEmpty()) return emptyList()
+
+        val copies = HashMap<String, Pair<Uri, Long>>()
+        resolver.query(
+            videoCollection,
+            arrayOf(
+                MediaStore.Video.Media._ID,
+                MediaStore.Video.Media.DISPLAY_NAME,
+                MediaStore.Video.Media.RELATIVE_PATH,
+                MediaStore.Video.Media.VOLUME_NAME,
+                MediaStore.Video.Media.SIZE,
+                MediaStore.Video.Media.DURATION,
+            ),
+            "${MediaStore.Video.Media.DISPLAY_NAME} LIKE ?", arrayOf("%$suffix"), null,
+        )?.use { c ->
+            while (c.moveToNext()) {
+                val name = c.getString(1) ?: continue
+                if (c.getLong(4) <= 0L) continue
+                val duration = c.getLongOrNull(5)?.takeIf { it > 0 } ?: continue
+                val volume = c.getString(3) ?: MediaStore.VOLUME_EXTERNAL_PRIMARY
+                copies[key(volume, c.getString(2) ?: "", name)] =
+                    ContentUris.withAppendedId(videoCollection, c.getLong(0)) to duration
+            }
+        }
+
+        return originals.mapNotNull { video ->
+            if (video.durationMs <= 0) return@mapNotNull null
+            val (copy, duration) = copies[key(video.volumeName, PhotoNaming.targetVideoPath(video.relativePath), video.convertedName)]
+                ?: return@mapNotNull null
+            val close = kotlin.math.abs(duration - video.durationMs) <= maxOf(DURATION_MATCH_TOLERANCE_MS, video.durationMs / 100)
+            if (close) video to copy else null
+        }
+    }
+
     /** Gives a converted video its original's name once the original is gone. */
     fun renameVideo(uri: Uri, name: String): Boolean = runCatching {
         resolver.update(uri, ContentValues().apply { put(MediaStore.Video.Media.DISPLAY_NAME, name) }, null, null) > 0

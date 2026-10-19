@@ -30,9 +30,10 @@
         Off again each time the app opens.</string>
     <string name="action_convert">Convert pictures to HEIC</string>
     <string name="action_cleanup">Clean up leftovers</string>
-    <string name="action_cleanup_hint">Finds JPGs and PNGs in this range that already have a HEIC beside
-        them, and songs that already have their Opus copy — left behind by a run that was cancelled
-        or whose delete prompt was declined.</string>
+    <string name="action_cleanup_hint">Deletes originals that were converted but never removed,
+        because a run was cancelled or its delete prompt declined: pictures (JPG, PNG) with a HEIC
+        and videos with an _HEVC copy, both in this range, and songs (MP3, M4A, FLAC) of any date
+        with an Opus copy. Each video\'s copy then takes the original\'s name.</string>
     <string name="action_cancel">Cancel</string>
     <string name="action_view">View</string>
     <string name="action_delete">Delete</string>
@@ -184,7 +185,9 @@ This frees
     <string name="confirm_delete_button">Convert and delete</string>
     <string name="confirm_keep_button">Convert, keep originals</string>
     <string name="cleanup_title">Delete leftover originals?</string>
-    <string name="cleanup_message">Every JPG or PNG this finds already has a HEIC beside it in the same
-        folder, and every song an Opus copy of the same length. You will be asked to confirm before
-        anything is deleted.</string>
+    <string name="cleanup_message">Only originals whose converted copy is already beside them are
+        offered: a picture with a HEIC of the same name and date, a video with an _HEVC copy of the
+        same length, a song with an Opus copy of the same length.\n\nAndroid will list them and ask
+        you to confirm before anything is deleted. Once a video\'s original is gone, its copy is
+        renamed to the original\'s name.</string>
 </resources>

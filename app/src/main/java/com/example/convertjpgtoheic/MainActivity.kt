@@ -1029,7 +1029,7 @@ class MainActivity : AppCompatActivity() {
                 if (report.cancelled) {
                     appendLine("Stopped before the search finished.")
                 } else {
-                    appendLine("No leftover originals found (JPGs in this range, or songs).")
+                    appendLine("No leftover originals found (pictures and videos in this range, or songs).")
                 }
 
             DeletionOutcome.PENDING ->
@@ -1037,7 +1037,7 @@ class MainActivity : AppCompatActivity() {
 
             DeletionOutcome.COMPLETED -> {
                 appendLine("Deleted ${report.deletedOriginals} leftover originals.")
-                appendLine("Found:     ${report.leftoverJpgs} JPGs, ${report.leftoverMp3s} songs")
+                appendLine("Found:     ${report.leftoverJpgs} pictures, ${report.leftoverVideos} videos, ${report.leftoverMp3s} songs")
                 appendLine("Reclaimed: ${formatSize(report.originalBytes)}")
             }
 
