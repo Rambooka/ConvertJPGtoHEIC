@@ -30,7 +30,8 @@
     <string name="action_convert">Convert</string>
     <string name="action_cleanup">Clean up leftovers</string>
     <string name="action_cleanup_hint">Finds JPGs in this range that already have a HEIC beside
-        them — left behind by a run that was cancelled or whose delete prompt was declined.</string>
+        them, and MP3s that already have their Opus copy — left behind by a run that was cancelled
+        or whose delete prompt was declined.</string>
     <string name="action_cancel">Cancel</string>
     <string name="action_view">View</string>
     <string name="action_delete">Delete</string>
@@ -159,5 +160,6 @@ This frees
     <string name="confirm_keep_button">Convert, keep originals</string>
     <string name="cleanup_title">Delete leftover originals?</string>
     <string name="cleanup_message">Every JPG this finds already has a HEIC beside it in the same
-        folder. You will be asked to confirm before anything is deleted.</string>
+        folder, and every MP3 an Opus copy of the same length. You will be asked to confirm before
+        anything is deleted.</string>
 </resources>

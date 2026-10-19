@@ -242,6 +242,9 @@ data class RunReport(
     val musicNotSmaller: Int = 0,
     /** Music runs only: earlier `.ogg` copies renamed to `.opus`. */
     val musicRenamed: Int = 0,
+    /** Clean-up runs only: leftovers found, by kind; [deletedOriginals] is how many went. */
+    val leftoverJpgs: Int = 0,
+    val leftoverMp3s: Int = 0,
 ) {
     /**
      * Records a whole-run failure with no single file behind it — no encoder, storage full.
@@ -980,26 +983,31 @@ class ConversionEngine private constructor(context: Context) {
 
     // region clean up
 
-    /** Removes JPGs that already have a HEIC beside them — the leftovers of an interrupted run. */
+    /**
+     * Removes the leftovers of interrupted runs: JPGs in the range that already have a HEIC beside
+     * them, and MP3s (any date — music has no capture date) that already have their `.opus`.
+     */
     private suspend fun cleanUp(options: RunOptions) {
         val stranded = repository.findStrandedOriginals(DateRange(options.startMs, options.endMs))
+        val strandedMp3s = if (cancelRequested) emptyList() else repository.findStrandedMp3s()
         if (cancelRequested) {
             _state.value = UiState.Finished(RunReport(RunMode.CLEAN_UP, cancelled = true))
             return
         }
-        if (stranded.isEmpty()) {
+        val total = stranded.size + strandedMp3s.size
+        if (total == 0) {
             _state.value = UiState.Finished(RunReport(RunMode.CLEAN_UP))
             return
         }
 
-        _state.value = UiState.AwaitingDeletion(
-            RunMode.CLEAN_UP, 0, stranded.size, stranded.size,
-        )
-        val answer = confirmDeletion(stranded.map { it.uri })
+        _state.value = UiState.AwaitingDeletion(RunMode.CLEAN_UP, 0, total, total)
+        val answer = confirmDeletion(stranded.map { it.uri } + strandedMp3s.map { it.uri })
         _state.value = UiState.Finished(
             RunReport(
                 RunMode.CLEAN_UP,
-                originalBytes = stranded.sumOf { it.sizeBytes },
+                originalBytes = stranded.sumOf { it.sizeBytes } + strandedMp3s.sumOf { it.sizeBytes },
+                leftoverJpgs = stranded.size,
+                leftoverMp3s = strandedMp3s.size,
                 deletedOriginals = answer.deleted,
                 deletionOutcome = if (answer.granted) {
                     DeletionOutcome.COMPLETED

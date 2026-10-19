@@ -922,14 +922,15 @@ class MainActivity : AppCompatActivity() {
                 if (report.cancelled) {
                     appendLine("Stopped before the search finished.")
                 } else {
-                    appendLine("No leftover originals found in this range.")
+                    appendLine("No leftover originals found (JPGs in this range, or MP3s).")
                 }
 
             DeletionOutcome.PENDING ->
                 appendLine("Waiting for you to confirm deletion…")
 
             DeletionOutcome.COMPLETED -> {
-                appendLine("Deleted ${report.deletedOriginals} leftover JPGs.")
+                appendLine("Deleted ${report.deletedOriginals} leftover originals.")
+                appendLine("Found:     ${report.leftoverJpgs} JPGs, ${report.leftoverMp3s} MP3s")
                 appendLine("Reclaimed: ${formatSize(report.originalBytes)}")
             }
 

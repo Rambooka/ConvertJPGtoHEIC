@@ -691,6 +691,45 @@ class PhotoRepository(private val context: Context) {
         )?.use { it.count > 0 } ?: false
 
     /**
+     * MP3s that already have their `.opus` beside them — kept by a run that was cancelled, had
+     * "Delete originals" off, or whose delete prompt was declined. The music run skips exactly
+     * these ([opusExistsBeside]), so without this they would never be cleared.
+     *
+     * As with [findStrandedOriginals], a name match alone does not justify deleting the MP3: the
+     * copy must also be non-empty and run as long, which a truncated or unrelated file would not.
+     */
+    fun findStrandedMp3s(): List<SourceTrack> {
+        val mp3s = queryMusicMp3s()
+        if (mp3s.isEmpty()) return emptyList()
+
+        val opusDurations = mutableMapOf<String, Long>()
+        val projection = arrayOf(
+            MediaStore.Audio.Media.DISPLAY_NAME,
+            MediaStore.Audio.Media.RELATIVE_PATH,
+            MediaStore.Audio.Media.VOLUME_NAME,
+            MediaStore.Audio.Media.SIZE,
+            MediaStore.Audio.Media.DURATION,
+        )
+        val selection = "${MediaStore.Audio.Media.DISPLAY_NAME} LIKE ?"
+        resolver.query(audioCollection, projection, selection, arrayOf("%.opus"), null)?.use { c ->
+            while (c.moveToNext()) {
+                val name = c.getString(0) ?: continue
+                if (c.getLong(3) <= 0L) continue
+                val duration = c.getLongOrNull(4)?.takeIf { it > 0 } ?: continue
+                val volume = c.getString(2) ?: MediaStore.VOLUME_EXTERNAL_PRIMARY
+                opusDurations[key(volume, c.getString(1) ?: "", name)] = duration
+            }
+        }
+
+        return mp3s.filter { mp3 ->
+            if (mp3.durationMs <= 0) return@filter false
+            val expected = key(mp3.volumeName, PhotoNaming.targetAudioPath(mp3.relativePath), mp3.opusName)
+            val opus = opusDurations[expected] ?: return@filter false
+            kotlin.math.abs(opus - mp3.durationMs) <= maxOf(DURATION_MATCH_TOLERANCE_MS, mp3.durationMs / 100)
+        }
+    }
+
+    /**
      * Publishes [staged] as [SourceTrack.opusName] beside the original, and returns its URI. The
      * scanner reads title, artist, album and cover from the file's own tags when it goes live.
      */
@@ -938,6 +977,12 @@ class PhotoRepository(private val context: Context) {
 
         /** EXIF stores whole seconds, so a rescanned HEIC may differ in the milliseconds. */
         private const val DATE_MATCH_TOLERANCE_MS = 1000L
+
+        /**
+         * An MP3's MediaStore duration is the scanner's estimate, and the Opus copy carries the
+         * encoder's padding; a real copy lands within a few tens of milliseconds.
+         */
+        private const val DURATION_MATCH_TOLERANCE_MS = 2000L
         private const val TAG = "PhotoRepository"
     }
 }
