@@ -49,6 +49,17 @@ class OggOpusTest {
     }
 
     @Test
+    fun `a YEAR is added from DATE for Android's music library`() {
+        fun year(vararg c: Pair<String, String>) = OggOpus.withYear(c.toList()).filter { it.first == "YEAR" }.map { it.second }
+        assertEquals(listOf("2013"), year("DATE" to "2013-11-08"))
+        assertEquals(listOf("2003"), year("DATE" to "2003"))
+        assertEquals(listOf("1999"), year("YEAR" to "1999", "DATE" to "2013")) // an existing YEAR wins
+        assertEquals(emptyList<String>(), year("DATE" to "20131108")) // not a year
+        assertEquals(emptyList<String>(), year("DATE" to "Summer"))
+        assertEquals(emptyList<String>(), year("TITLE" to "No date"))
+    }
+
+    @Test
     fun `comment packet size is predicted exactly`() {
         val comments = listOf("TITLE" to "Café del Mar", "ARTIST" to "Ünïcødé", "EMPTY" to "")
         for (c in listOf(emptyList(), comments)) {

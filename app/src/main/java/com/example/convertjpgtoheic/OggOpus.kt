@@ -134,6 +134,22 @@ object OggOpus {
             comments.sumOf { (key, value) -> 4L + "$key=$value".toByteArray(Charsets.UTF_8).size }
 
     /**
+     * [comments] with a `YEAR` added from `DATE` when there is none.
+     *
+     * `DATE` is the Vorbis name, and what other players read, but Android files it as a date that
+     * MediaStore never shows; its music library takes the year from `YEAR` alone (MetaDataUtils'
+     * parseVorbisComment). Without this every converted song lost its year in Android's apps.
+     */
+    fun withYear(comments: List<Pair<String, String>>): List<Pair<String, String>> {
+        if (comments.any { it.first.equals("YEAR", ignoreCase = true) }) return comments
+        val date = comments.firstOrNull { it.first.equals("DATE", ignoreCase = true) }?.second ?: return comments
+        val year = YEAR_PREFIX.find(date.trim())?.value ?: return comments
+        return comments + ("YEAR" to year)
+    }
+
+    private val YEAR_PREFIX = Regex("^\\d{4}(?!\\d)")
+
+    /**
      * [pictures] with the first marked as the front cover when none is.
      *
      * Android takes Ogg cover art only from a front-cover picture (MetaDataUtils' extractAlbumArt

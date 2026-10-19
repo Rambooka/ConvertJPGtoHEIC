@@ -78,7 +78,7 @@ class MusicConverter(private val context: Context) {
             val read = readTags(track.uri).let { it.copy(pictures = it.pictures.take(1)) }
             val shrunk = shrinkPictures(read)
             val tags = shrunk.copy(pictures = OggOpus.withFrontCover(shrunk.pictures))
-            val comments = tags.comments + tags.pictures.map(OggOpus::pictureComment)
+            val comments = OggOpus.withYear(tags.comments) + tags.pictures.map(OggOpus::pictureComment)
             // Checked before the encode, which would otherwise be wasted. The vendor string is
             // the encoder's and not known yet; it is a few dozen bytes.
             val tagBytes = OggOpus.commentPacketSize("", comments) + VENDOR_ALLOWANCE
