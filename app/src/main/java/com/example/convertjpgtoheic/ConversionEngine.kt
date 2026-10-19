@@ -45,6 +45,9 @@ enum class RunMode {
      */
     MUSIC_REPAIR,
 
+    /** Delete iTunes Store copy-protected songs (`.m4p`), which nothing on the phone can play or convert. */
+    DELETE_PROTECTED,
+
     /**
      * Re-encode the music library's MP3s as Opus in `.opus` files, keep each only if it is smaller,
      * then offer to delete the MP3s. See [MusicConverter].
@@ -248,6 +251,8 @@ data class RunReport(
     val musicNotSmaller: Int = 0,
     /** Music runs only: earlier `.ogg` copies renamed to `.opus`. */
     val musicRenamed: Int = 0,
+    /** Copy-protected deletion runs only: `.m4p` songs found; [deletedOriginals] is how many went. */
+    val protectedFound: Int = 0,
     /** Music repair runs only: songs given a year the music library now shows. */
     val musicYearsFixed: Int = 0,
     /** Music repair runs only: no year anywhere in the tags to give them. */
@@ -498,6 +503,7 @@ class ConversionEngine private constructor(context: Context) {
                 RunMode.CLEAN_UP -> cleanUp(options)
                 RunMode.REPAIR -> repair()
                 RunMode.MUSIC_REPAIR -> repairMusic()
+                RunMode.DELETE_PROTECTED -> deleteProtected()
                 RunMode.VIDEO -> convertVideos(options)
                 RunMode.MUSIC -> convertMusic(options)
                 else -> convert(mode, options)
@@ -1590,6 +1596,27 @@ class ConversionEngine private constructor(context: Context) {
                 cancelled = cancelRequested,
                 musicYearsFixed = showing,
                 repairUnverified = repaired.size - showing,
+            )
+        )
+    }
+
+    /** Offers every copy-protected `.m4p` for deletion, through the system's own confirmation. */
+    private suspend fun deleteProtected() {
+        val mode = RunMode.DELETE_PROTECTED
+        val songs = repository.queryProtectedSongs()
+        if (songs.isEmpty() || cancelRequested) {
+            _state.value = UiState.Finished(RunReport(mode, cancelled = cancelRequested))
+            return
+        }
+        _state.value = UiState.AwaitingDeletion(mode, 0, songs.size, songs.size)
+        val answer = confirmDeletion(songs.map { it.uri })
+        _state.value = UiState.Finished(
+            RunReport(
+                mode,
+                protectedFound = songs.size,
+                originalBytes = songs.sumOf { it.sizeBytes },
+                deletedOriginals = answer.deleted,
+                deletionOutcome = if (answer.granted) DeletionOutcome.COMPLETED else DeletionOutcome.DECLINED,
             )
         )
     }

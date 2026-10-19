@@ -122,6 +122,7 @@ class MainActivity : AppCompatActivity() {
         binding.videoButton.setOnClickListener { confirmThenConvertVideos() }
         binding.musicButton.setOnClickListener { confirmThenConvertMusic() }
         binding.musicRepairButton.setOnClickListener { confirmThenRepairMusic() }
+        binding.deleteProtectedButton.setOnClickListener { confirmThenDeleteProtected() }
         binding.cancelButton.setOnClickListener { engine.cancel() }
 
         binding.qualitySlider.addOnChangeListener { _, value, _ ->
@@ -439,7 +440,9 @@ class MainActivity : AppCompatActivity() {
     private fun startRun(mode: RunMode) {
         // A repair and a music run cover the whole library, so they are the runs that need no range.
         val current = range?.takeIf { it.isValid }
-            ?: if (mode == RunMode.REPAIR || mode == RunMode.MUSIC || mode == RunMode.MUSIC_REPAIR) {
+            ?: if (mode == RunMode.REPAIR || mode == RunMode.MUSIC || mode == RunMode.MUSIC_REPAIR ||
+                mode == RunMode.DELETE_PROTECTED
+            ) {
                 DateRange(0L, Long.MAX_VALUE)
             } else {
                 null
@@ -605,6 +608,20 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    private fun confirmThenDeleteProtected() {
+        if (!granted(readAudioPermission())) {
+            binding.statusText.setText(R.string.music_need_permission)
+            permissionLauncher.launch(arrayOf(readAudioPermission()))
+            return
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.delete_protected_title)
+            .setMessage(R.string.delete_protected_message)
+            .setPositiveButton(android.R.string.ok) { _, _ -> startRun(RunMode.DELETE_PROTECTED) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
     private fun confirmThenRepair() {
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.repair_title)
@@ -652,6 +669,7 @@ class MainActivity : AppCompatActivity() {
         // Music needs neither photo access nor a range, only its own permission (asked on tap).
         binding.musicButton.isEnabled = !busy && EncoderSupport.hasOpusEncoder
         binding.musicRepairButton.isEnabled = !busy
+        binding.deleteProtectedButton.isEnabled = !busy
         binding.rangeButton.isEnabled = !busy
         binding.cancelButton.isVisible(state is UiState.Working || state is UiState.AwaitingDeletion)
         binding.progressBar.isVisible(busy)
@@ -689,7 +707,7 @@ class MainActivity : AppCompatActivity() {
                 binding.progressBar.max = state.progress.total
                 binding.progressBar.setProgressCompat(state.progress.done, true)
                 binding.statusText.text = when (state.mode) {
-                    RunMode.CLEAN_UP -> getString(R.string.progress_cleanup)
+                    RunMode.CLEAN_UP, RunMode.DELETE_PROTECTED -> getString(R.string.progress_cleanup)
                     RunMode.REPAIR -> repairStatus(state.progress)
                     RunMode.MUSIC_REPAIR -> musicRepairStatus(state.progress)
                     RunMode.VIDEO -> videoStatus(state.progress)
@@ -708,7 +726,8 @@ class MainActivity : AppCompatActivity() {
                         state.mode == RunMode.REPAIR -> R.plurals.awaiting_repair_access
                         state.mode == RunMode.MUSIC_REPAIR -> R.plurals.awaiting_music_repair_access
                         state.mode == RunMode.VIDEO -> R.plurals.awaiting_video_deletion
-                        state.mode == RunMode.MUSIC -> R.plurals.awaiting_music_deletion
+                        state.mode == RunMode.MUSIC || state.mode == RunMode.DELETE_PROTECTED ->
+                            R.plurals.awaiting_music_deletion
                         state.lowOnSpace -> R.plurals.awaiting_deletion_low_space
                         else -> R.plurals.awaiting_deletion
                     },
@@ -735,6 +754,7 @@ class MainActivity : AppCompatActivity() {
             RunMode.CLEAN_UP -> "Clean-up"
             RunMode.REPAIR -> "Repair"
             RunMode.MUSIC_REPAIR -> "Music repair"
+            RunMode.DELETE_PROTECTED -> "Copy-protected songs"
             RunMode.VIDEO -> "Video conversion"
             RunMode.MUSIC -> "Music conversion"
         }
@@ -747,6 +767,10 @@ class MainActivity : AppCompatActivity() {
         }
         if (report.mode == RunMode.REPAIR) {
             describeRepair(report)
+            return@buildString
+        }
+        if (report.mode == RunMode.DELETE_PROTECTED) {
+            describeProtected(report)
             return@buildString
         }
         if (report.mode == RunMode.MUSIC_REPAIR) {
@@ -932,6 +956,18 @@ class MainActivity : AppCompatActivity() {
             )
         )
         append(etaText(p.remainingMs))
+    }
+
+    private fun StringBuilder.describeProtected(report: RunReport) {
+        if (report.protectedFound == 0) {
+            appendLine(if (report.cancelled) "Stopped before the search finished." else "No copy-protected (.m4p) songs found.")
+            return
+        }
+        appendLine("Found:             ${report.protectedFound} (${formatSize(report.originalBytes)})")
+        when (report.deletionOutcome) {
+            DeletionOutcome.COMPLETED -> appendLine("Deleted:           ${report.deletedOriginals}")
+            else -> appendLine("Deletion was declined; nothing was removed.")
+        }
     }
 
     private fun StringBuilder.describeMusicRepair(report: RunReport) {

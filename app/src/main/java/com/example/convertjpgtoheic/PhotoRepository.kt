@@ -86,7 +86,7 @@ data class HeicRow(
     val path: String?,
 )
 
-/** An Opus song in the music library, as the music repair needs it. */
+/** A song in the music library, as the music repair and the copy-protected deletion need it. */
 data class OpusRow(
     val uri: Uri,
     val id: Long,
@@ -745,6 +745,36 @@ class PhotoRepository(private val context: Context) {
             val opus = opusDurations[expected] ?: return@filter false
             kotlin.math.abs(opus - mp3.durationMs) <= maxOf(DURATION_MATCH_TOLERANCE_MS, mp3.durationMs / 100)
         }
+    }
+
+    /**
+     * Every `.m4p` in the music library: iTunes Store purchases under FairPlay copy protection,
+     * whose audio is encrypted, so nothing on the phone can play or convert them.
+     */
+    fun queryProtectedSongs(): List<OpusRow> {
+        val projection = arrayOf(
+            MediaStore.Audio.Media._ID,
+            MediaStore.Audio.Media.DISPLAY_NAME,
+            MediaStore.Audio.Media.SIZE,
+            @Suppress("DEPRECATION") MediaStore.Audio.Media.DATA,
+        )
+        val rows = ArrayList<OpusRow>()
+        resolver.query(
+            audioCollection, projection, "${MediaStore.Audio.Media.DISPLAY_NAME} LIKE ?", arrayOf("%.m4p"),
+            "${MediaStore.Audio.Media.RELATIVE_PATH} ASC, ${MediaStore.Audio.Media.DISPLAY_NAME} ASC",
+        )?.use { c ->
+            while (c.moveToNext()) {
+                val id = c.getLong(0)
+                rows += OpusRow(
+                    uri = ContentUris.withAppendedId(audioCollection, id),
+                    id = id,
+                    displayName = c.getString(1) ?: continue,
+                    sizeBytes = c.getLong(2),
+                    path = c.getString(3),
+                )
+            }
+        }
+        return rows
     }
 
     /** Every `.opus` in the music library, folder by folder: what the music repair looks through. */

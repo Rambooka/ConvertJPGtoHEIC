@@ -286,6 +286,21 @@
             android:text="@string/action_music_repair_hint"
             android:textAppearance="?attr/textAppearanceBodySmall" />
 
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/deleteProtectedButton"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="@string/action_delete_protected" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="@string/action_delete_protected_hint"
+            android:textAppearance="?attr/textAppearanceBodySmall" />
+
         <!-- Progress -->
         <com.google.android.material.progressindicator.LinearProgressIndicator
             android:id="@+id/progressBar"
