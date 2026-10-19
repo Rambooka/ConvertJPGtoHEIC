@@ -70,7 +70,8 @@ class MusicConverter(private val context: Context) {
         out.delete()
         scratch.delete()
         try {
-            val tags = shrinkPictures(readTags(track.uri))
+            val read = shrinkPictures(readTags(track.uri))
+            val tags = read.copy(pictures = OggOpus.withFrontCover(read.pictures))
             val comments = tags.comments + tags.pictures.map(OggOpus::pictureComment)
             // Checked before the encode, which would otherwise be wasted. The vendor string is
             // the encoder's and not known yet; it is a few dozen bytes.
@@ -86,6 +87,8 @@ class MusicConverter(private val context: Context) {
             verify(out, tags, sourceUs)?.let { throw Problem(it) }
             return Outcome.Converted(out.length())
         } catch (e: Problem) {
+            // Logged as well as reported: the report is gone once the app is closed.
+            Log.i(TAG, "Not converting ${track.displayName}: ${e.message}")
             out.delete()
             return Outcome.Failed(e.message ?: "unknown")
         } catch (e: Exception) {

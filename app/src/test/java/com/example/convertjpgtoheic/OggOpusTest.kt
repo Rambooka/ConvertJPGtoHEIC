@@ -40,6 +40,15 @@ class OggOpusTest {
     private val audio = List(5) { i -> ByteArray(100 + i * 37) { (it * 7 + i).toByte() } }
 
     @Test
+    fun `the first picture becomes the front cover only when there is none`() {
+        fun pic(type: Int) = Id3Tags.Picture("image/jpeg", type, "", byteArrayOf(type.toByte()))
+        assertEquals(listOf(3, 0), OggOpus.withFrontCover(listOf(pic(255), pic(0))).map { it.type })
+        assertEquals(listOf(3, 255), OggOpus.withFrontCover(listOf(pic(3), pic(255))).map { it.type })
+        assertEquals(listOf(0, 3), OggOpus.withFrontCover(listOf(pic(0), pic(3))).map { it.type })
+        assertEquals(emptyList<Int>(), OggOpus.withFrontCover(emptyList()).map { it.type })
+    }
+
+    @Test
     fun `comment packet size is predicted exactly`() {
         val comments = listOf("TITLE" to "Café del Mar", "ARTIST" to "Ünïcødé", "EMPTY" to "")
         for (c in listOf(emptyList(), comments)) {

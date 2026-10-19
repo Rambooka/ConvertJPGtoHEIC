@@ -134,6 +134,19 @@ object OggOpus {
             comments.sumOf { (key, value) -> 4L + "$key=$value".toByteArray(Charsets.UTF_8).size }
 
     /**
+     * [pictures] with the first marked as the front cover when none is.
+     *
+     * Android takes Ogg cover art only from a front-cover picture (MetaDataUtils' extractAlbumArt
+     * skips any other type), while its MP3 reader shows whatever APIC there is. Taggers often
+     * leave the type at 0 ("other"), and some write invalid ones (255), so without this the cover
+     * shows on the MP3 and vanishes from the copy.
+     */
+    fun withFrontCover(pictures: List<Id3Tags.Picture>): List<Id3Tags.Picture> {
+        if (pictures.isEmpty() || pictures.any { it.type == Id3Tags.FRONT_COVER }) return pictures
+        return listOf(pictures[0].copy(type = Id3Tags.FRONT_COVER)) + pictures.drop(1)
+    }
+
+    /**
      * A picture as a `METADATA_BLOCK_PICTURE` value: a FLAC picture block, base64-encoded. Width,
      * height and depth are optional hints and left at zero.
      */
