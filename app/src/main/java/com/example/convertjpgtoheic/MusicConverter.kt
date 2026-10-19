@@ -37,9 +37,10 @@ data class SourceTrack(
 }
 
 /**
- * Re-encodes an MP3, or an AAC song in an MP4 (`.m4a`), as Opus in an Ogg file, named `.opus`.
- * The tags come from ID3 for an MP3 and from iTunes' `ilst` for an M4A ([M4aTags]); either way
- * they arrive as Vorbis comments, and nothing after reading them differs.
+ * Re-encodes an MP3, an AAC song in an MP4 (`.m4a`) or a FLAC, as Opus in an Ogg file, named
+ * `.opus`. The tags come from ID3 for an MP3, from iTunes' `ilst` for an M4A ([M4aTags]) and from
+ * FLAC's own Vorbis comments ([FlacTags]); either way they arrive as Vorbis comments, and nothing
+ * after reading them differs.
  *
  * `.opus` rather than `.ogg`, although both are the same Ogg container: tag editors built on
  * jaudiotagger (Pulsar+, for one) take an `.ogg` to be Vorbis and refuse to open an Opus one
@@ -114,6 +115,7 @@ class MusicConverter(private val context: Context) {
         val v2 = input.use {
             val header = it.readNBytesCompat(10)
             if (M4aTags.isMp4(header)) return readMp4Tags(uri)
+            if (FlacTags.isFlac(header)) return readFlacTags(uri)
             val length = Id3Tags.v2Length(header)
             when {
                 length == 0 -> null // no ID3v2 tag: perfectly ordinary
@@ -135,6 +137,11 @@ class MusicConverter(private val context: Context) {
         }
         return Id3Tags.parse(v2, v1)
     }
+
+    private fun readFlacTags(uri: Uri): Id3Tags.Tags =
+        context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+            FlacTags.read(FdSource(pfd.fileDescriptor, pfd.statSize))
+        } ?: throw Problem("its tags could not be read")
 
     private fun readMp4Tags(uri: Uri): Id3Tags.Tags =
         context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
@@ -232,7 +239,7 @@ class MusicConverter(private val context: Context) {
             extractor.selectTrack(index)
             val inFormat = extractor.getTrackFormat(index)
             val mime = inFormat.getString(MediaFormat.KEY_MIME)!!
-            if (mime !in SOURCE_MIMES) throw Problem("it is $mime, not MP3 or AAC")
+            if (mime !in SOURCE_MIMES) throw Problem("it is $mime, not MP3, AAC or FLAC")
             val expectedUs = if (inFormat.containsKey(MediaFormat.KEY_DURATION)) {
                 inFormat.getLong(MediaFormat.KEY_DURATION)
             } else {
@@ -240,6 +247,9 @@ class MusicConverter(private val context: Context) {
             }
 
             val dec = MediaCodec.createDecoderByType(mime).also { decoder = it }
+            // 16-bit, which is all the pipeline takes: a 24-bit FLAC would otherwise come out of
+            // the decoder as float. MP3 and AAC decoders give 16-bit regardless.
+            inFormat.setInteger(MediaFormat.KEY_PCM_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
             dec.configure(inFormat, null, null, 0)
             dec.start()
 
@@ -514,8 +524,10 @@ class MusicConverter(private val context: Context) {
     companion object {
         private const val TAG = "MusicConverter"
 
-        /** What the platform's decoders are asked to take: MP3, and AAC (`audio/mp4a-latm`) from an M4A. */
-        private val SOURCE_MIMES = setOf(MediaFormat.MIMETYPE_AUDIO_MPEG, MediaFormat.MIMETYPE_AUDIO_AAC)
+        /** What the platform's decoders are asked to take: MP3, AAC (`audio/mp4a-latm`) from an M4A, and FLAC. */
+        private val SOURCE_MIMES = setOf(
+            MediaFormat.MIMETYPE_AUDIO_MPEG, MediaFormat.MIMETYPE_AUDIO_AAC, MediaFormat.MIMETYPE_AUDIO_FLAC,
+        )
 
         private const val OPUS_RATE = 48_000
         private const val OPUS_COMPLEXITY = 10

@@ -111,18 +111,18 @@ This frees
         <item quantity="other">Waiting for you to confirm deleting %1$d original videos.</item>
     </plurals>
     <string name="action_music">Convert music to Opus</string>
-    <string name="action_music_hint">Re-encodes every MP3 and M4A in your music library as Opus (.opus),
+    <string name="action_music_hint">Re-encodes every MP3, M4A and FLAC in your music library as Opus (.opus),
         keeping title, artist, album and cover. A song is only kept as .opus if it comes out
         smaller. Covers the whole library, not just this range. Uses the delete option above.</string>
     <string name="music_title">Convert music to Opus?</string>
-    <string name="music_message_delete">Each MP3 and M4A in your music library is re-encoded as Opus and
+    <string name="music_message_delete">Each MP3, M4A and FLAC in your music library is re-encoded as Opus and
         saved beside it as name.opus, with its tags and cover copied across. A copy is only kept if
         it is smaller than the original, and only after it has been checked against it.\n\nYou will be
         asked to confirm deleting the originals every 100 songs. Playlists that list the originals will lose
         those songs; the new copies can be added back.\n\nRe-encoding a compressed file loses a
         little quality. It is rarely audible at the bitrates used, but the originals cannot be got back
         once deleted.</string>
-    <string name="music_message_keep">Each MP3 and M4A in your music library is re-encoded as Opus and
+    <string name="music_message_keep">Each MP3, M4A and FLAC in your music library is re-encoded as Opus and
         saved beside it as name.opus, with its tags and cover copied across. A copy is only kept if
         it is smaller than the original, and only after it has been checked against it.\n\n\"Delete
         originals\" is off, so the originals will be kept and both copies will show in your music

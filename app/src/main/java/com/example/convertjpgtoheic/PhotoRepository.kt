@@ -656,7 +656,7 @@ class PhotoRepository(private val context: Context) {
     private val audioCollection: Uri = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
 
     /**
-     * Every MP3 and AAC song (`.m4a`) the music library knows of, folder by folder. Not limited to
+     * Every MP3, AAC song (`.m4a`) and FLAC the music library knows of, folder by folder. Not limited to
      * the date range: songs have no capture date, and the range is about when photos were taken.
      *
      * Matched by MIME type, and by name as well: MediaStore has been seen filing whole albums of
@@ -1076,9 +1076,10 @@ class PhotoRepository(private val context: Context) {
          */
         private const val DURATION_MATCH_TOLERANCE_MS = 2000L
 
-        /** MP3, and the names MediaStore gives AAC in an MP4 or bare. */
+        /** MP3, the names MediaStore gives AAC in an MP4 or bare, and FLAC. */
         private val SOURCE_AUDIO_MIMES = listOf(
             "audio/mpeg", "audio/mp4", "audio/x-m4a", "audio/m4a", "audio/aac", "audio/aacp", "audio/mp4a-latm",
+            "audio/flac", "audio/x-flac",
         )
         private const val TAG = "PhotoRepository"
     }
