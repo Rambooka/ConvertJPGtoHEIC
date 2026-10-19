@@ -136,19 +136,20 @@ internal object JpgQuery {
     private val TAKEN = MediaStore.Images.Media.DATE_TAKEN
     private val MODIFIED = MediaStore.Images.Media.DATE_MODIFIED
 
-    val selection: String =
+    fun selection(excludedFolders: List<String>): String =
         "$MIME IN (?, ?, ?) AND " +
             "(($TAKEN IS NOT NULL AND $TAKEN > 0 AND $TAKEN BETWEEN ? AND ?) OR " +
-            "(($TAKEN IS NULL OR $TAKEN <= 0) AND $MODIFIED BETWEEN ? AND ?))"
+            "(($TAKEN IS NULL OR $TAKEN <= 0) AND $MODIFIED BETWEEN ? AND ?))" +
+            FolderExclusion.sql(MediaStore.Images.Media.RELATIVE_PATH, excludedFolders)
 
-    fun args(startMs: Long, endMs: Long): Array<String> = arrayOf(
+    fun args(startMs: Long, endMs: Long, excludedFolders: List<String>): Array<String> = arrayOf(
         // PNG too: BitmapFactory decodes it the same way, and with no EXIF of its own it gets the
         // date-only block a bare JPG does.
         "image/jpeg", "image/jpg", "image/png",
         startMs.toString(), endMs.toString(),
         // DATE_MODIFIED is stored in seconds, DATE_TAKEN in milliseconds.
         (startMs / 1000).toString(), (endMs / 1000).toString(),
-    )
+    ) + FolderExclusion.args(excludedFolders)
 
     /**
      * The capture date to stamp on the HEIC. Falls back to DATE_MODIFIED whenever DATE_TAKEN is
@@ -156,6 +157,18 @@ internal object JpgQuery {
      */
     fun effectiveDateMs(dateTakenMs: Long?, dateModifiedSec: Long): Long =
         if (dateTakenMs != null && dateTakenMs > 0) dateTakenMs else dateModifiedSec * 1000
+}
+
+/**
+ * The `AND path NOT LIKE ?` clauses that keep [Settings.excludedFolders] out of a query. Each
+ * prefix is escaped, so a folder with `_` or `%` in its name matches only itself.
+ */
+internal object FolderExclusion {
+    fun sql(column: String, folders: List<String>): String =
+        folders.joinToString("") { " AND $column NOT LIKE ? ESCAPE '\\'" }
+
+    fun args(folders: List<String>): Array<String> =
+        folders.map { it.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%" }.toTypedArray()
 }
 
 /**
@@ -172,6 +185,9 @@ class PhotoRepository(private val context: Context) {
 
     private val resolver get() = context.contentResolver
     private val collection: Uri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+
+    /** Read at each query, so a change in the options applies to the next scan. */
+    private val excludedFolders: List<String> get() = Settings(context).excludedFolders
 
     /**
      * JPGs and PNGs whose capture date falls inside [startMs]..[endMs], both ends inclusive.
@@ -200,8 +216,8 @@ class PhotoRepository(private val context: Context) {
         resolver.query(
             collection,
             projection,
-            JpgQuery.selection,
-            JpgQuery.args(startMs, endMs),
+            JpgQuery.selection(excludedFolders),
+            JpgQuery.args(startMs, endMs, excludedFolders),
             "$taken ASC, $modified ASC",
         )
             ?.use { cursor ->
@@ -573,9 +589,12 @@ class PhotoRepository(private val context: Context) {
             MediaStore.Video.Media.HEIGHT,
             MediaStore.Video.Media.MIME_TYPE,
         )
+        val excluded = excludedFolders
         val selection = "(($taken IS NOT NULL AND $taken > 0 AND $taken BETWEEN ? AND ?) OR " +
-            "(($taken IS NULL OR $taken <= 0) AND $modified BETWEEN ? AND ?))"
-        val args = arrayOf(startMs.toString(), endMs.toString(), (startMs / 1000).toString(), (endMs / 1000).toString())
+            "(($taken IS NULL OR $taken <= 0) AND $modified BETWEEN ? AND ?))" +
+            FolderExclusion.sql(MediaStore.Video.Media.RELATIVE_PATH, excluded)
+        val args = arrayOf(startMs.toString(), endMs.toString(), (startMs / 1000).toString(), (endMs / 1000).toString()) +
+            FolderExclusion.args(excluded)
         val out = ArrayList<SourceVideo>()
         resolver.query(videoCollection, projection, selection, args, "$taken ASC, $modified ASC")?.use { c ->
             while (c.moveToNext()) {
@@ -719,15 +738,18 @@ class PhotoRepository(private val context: Context) {
             MediaStore.Audio.Media.DURATION,
             MediaStore.Audio.Media.BITRATE,
         )
+        val excluded = excludedFolders
         val mimes = SOURCE_AUDIO_MIMES.joinToString(", ") { "?" }
         // Not .m4p: iTunes Store copy protection (FairPlay). The audio is encrypted, so nothing on
         // the phone can decode it — or play it — and it would only ever be reported as failing.
         val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0 AND " +
             "(${MediaStore.Audio.Media.MIME_TYPE} IN ($mimes) OR ${MediaStore.Audio.Media.DISPLAY_NAME} LIKE ?) AND " +
-            "${MediaStore.Audio.Media.DISPLAY_NAME} NOT LIKE ?"
+            "${MediaStore.Audio.Media.DISPLAY_NAME} NOT LIKE ?" +
+            FolderExclusion.sql(MediaStore.Audio.Media.RELATIVE_PATH, excluded)
         val out = ArrayList<SourceTrack>()
         resolver.query(
-            audioCollection, projection, selection, (SOURCE_AUDIO_MIMES + "%.m4a" + "%.m4p").toTypedArray(),
+            audioCollection, projection, selection,
+            (SOURCE_AUDIO_MIMES + "%.m4a" + "%.m4p").toTypedArray() + FolderExclusion.args(excluded),
             "${MediaStore.Audio.Media.RELATIVE_PATH} ASC, ${MediaStore.Audio.Media.DISPLAY_NAME} ASC",
         )?.use { c ->
             while (c.moveToNext()) {

@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.widget.EditText
 import android.os.Bundle
 import android.util.Log
 import android.util.Size
@@ -37,6 +38,9 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
 import java.util.Date
+
+/** As much of a log as a dialog can show; the share sends the whole file. */
+private const val MAX_LOG_CHARS = 60_000
 
 class MainActivity : AppCompatActivity() {
 
@@ -133,6 +137,14 @@ class MainActivity : AppCompatActivity() {
             settings.quality = value.toInt()
         }
         binding.switchDelete.setOnCheckedChangeListener { _, on -> settings.deleteOriginals = on }
+        binding.switchTrash.setOnCheckedChangeListener { _, on -> settings.trashInstead = on }
+        binding.switchKeepScreenOn.setOnCheckedChangeListener { _, on ->
+            settings.keepScreenOn = on
+            updateButtons(engine.state.value)
+        }
+        binding.switchOnlyCharging.setOnCheckedChangeListener { _, on -> settings.onlyWhileCharging = on }
+        binding.excludeFoldersButton.setOnClickListener { editExcludedFolders() }
+        binding.viewLogButton.setOnClickListener { showLastLog() }
         binding.switchOnlySmaller.setOnCheckedChangeListener { _, on -> settings.onlyIfSmaller = on }
         binding.switchSkipSmall.setOnCheckedChangeListener { _, on -> settings.skipSmall = on }
         binding.switchShrinkOversized.setOnCheckedChangeListener { _, on -> settings.shrinkOversized = on }
@@ -173,6 +185,10 @@ class MainActivity : AppCompatActivity() {
         binding.qualitySlider.value = settings.quality.toFloat()
         showQuality(settings.quality)
         binding.switchDelete.isChecked = settings.deleteOriginals
+        binding.switchTrash.isChecked = settings.trashInstead
+        binding.switchKeepScreenOn.isChecked = settings.keepScreenOn
+        binding.switchOnlyCharging.isChecked = settings.onlyWhileCharging
+        showExcludedFolders()
         binding.switchOnlySmaller.isChecked = settings.onlyIfSmaller
         binding.switchSkipSmall.isChecked = settings.skipSmall
         binding.switchShrinkOversized.isChecked = settings.shrinkOversized
@@ -180,6 +196,54 @@ class MainActivity : AppCompatActivity() {
         checkMotionPolicy(settings.motionPolicy)
         range = settings.range
         showRange()
+    }
+
+    private fun showExcludedFolders() {
+        binding.excludeFoldersHint.text = getString(R.string.exclude_hint, settings.excludedFolders.joinToString("  "))
+    }
+
+    /** The folders every run leaves alone, one per line; a change rescans the range. */
+    private fun editExcludedFolders() {
+        val input = EditText(this).apply {
+            setText(settings.excludedFolders.joinToString("\n"))
+            hint = getString(R.string.exclude_example)
+            minLines = 3
+            setSingleLine(false)
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.exclude_title)
+            .setMessage(R.string.exclude_message)
+            .setView(input)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                settings.excludedFolders = input.text.toString().lines()
+                showExcludedFolders()
+                range?.takeIf { it.isValid }?.let { engine.scan(it) }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /** The last run's log, with a way to send it on. */
+    private fun showLastLog() {
+        val file = RunLog.latest(this)
+        if (file == null) {
+            binding.statusText.setText(R.string.log_none)
+            return
+        }
+        val whole = runCatching { file.readText() }.getOrDefault("")
+        val text = if (whole.length > MAX_LOG_CHARS) "…" + whole.takeLast(MAX_LOG_CHARS) else whole
+        MaterialAlertDialogBuilder(this)
+            .setTitle(file.name)
+            .setMessage(text)
+            .setPositiveButton(R.string.log_share) { _, _ ->
+                val send = Intent(Intent.ACTION_SEND)
+                    .setType("text/plain")
+                    .putExtra(Intent.EXTRA_SUBJECT, file.name)
+                    .putExtra(Intent.EXTRA_TEXT, whole)
+                startActivity(Intent.createChooser(send, null))
+            }
+            .setNegativeButton(R.string.log_close, null)
+            .show()
     }
 
     private fun selectedMotionPolicy(): MotionPhotoPolicy =
@@ -439,6 +503,8 @@ class MainActivity : AppCompatActivity() {
         skipAlreadyConverted = binding.switchSkipExisting.isChecked,
         motionPolicy = selectedMotionPolicy(),
         dryRun = binding.switchDryRun.isChecked,
+        trashOriginals = binding.switchTrash.isChecked,
+        onlyWhileCharging = binding.switchOnlyCharging.isChecked,
     )
 
     /**
@@ -688,6 +754,8 @@ class MainActivity : AppCompatActivity() {
         binding.rangeButton.isEnabled = !busy
         binding.cancelButton.isVisible(state is UiState.Working || state is UiState.AwaitingDeletion)
         binding.reshowPromptButton.isVisible(state is UiState.AwaitingDeletion)
+        // Screen off, Samsung confines the app to the slow cores — a song then takes ten times as long.
+        binding.root.keepScreenOn = busy && settings.keepScreenOn
         binding.progressBar.isVisible(busy)
     }
 
@@ -722,7 +790,7 @@ class MainActivity : AppCompatActivity() {
                 binding.progressBar.isIndeterminate = false
                 binding.progressBar.max = state.progress.total
                 binding.progressBar.setProgressCompat(state.progress.done, true)
-                binding.statusText.text = when (state.mode) {
+                val text = when (state.mode) {
                     RunMode.CLEAN_UP, RunMode.DELETE_PROTECTED -> getString(R.string.progress_cleanup)
                     RunMode.REPAIR -> repairStatus(state.progress)
                     RunMode.MUSIC_REPAIR -> musicRepairStatus(state.progress)
@@ -731,6 +799,7 @@ class MainActivity : AppCompatActivity() {
                     RunMode.DRY_RUN -> runningStatus(state.progress, R.string.progress_measuring)
                     RunMode.CONVERT -> runningStatus(state.progress, R.string.progress_converting)
                 }
+                binding.statusText.text = state.progress.pausedReason?.let { "Paused — $it.\n\n$text" } ?: text
             }
 
             is UiState.AwaitingDeletion -> {
@@ -776,6 +845,9 @@ class MainActivity : AppCompatActivity() {
         }
         appendLine(if (report.cancelled) "$label cancelled — partial results below." else "$label complete.")
         if (report.dryRun) appendLine("Dry run: nothing was saved or deleted. These are what a real run would do.")
+        if (report.trashed) {
+            appendLine("The originals went to the trash, not to deletion: they can be restored from the gallery's trash for 30 days, and the space comes back when it empties.")
+        }
         appendLine()
 
         if (report.mode == RunMode.CLEAN_UP) {
@@ -856,6 +928,9 @@ class MainActivity : AppCompatActivity() {
             appendLine("Skipped, a file of that name exists: ${report.renamedOutput}")
         }
         if (report.relocated > 0) appendLine("Saved under Pictures/ instead: ${report.relocated}")
+        if (report.flattenedTransparency > 0) {
+            appendLine("Transparent areas filled white: ${report.flattenedTransparency} (PNGs; HEIC keeps no transparency here)")
+        }
         if (report.dateWriteFailed > 0) {
             appendLine("Date could not be set on: ${report.dateWriteFailed} (EXIF still has it)")
         }

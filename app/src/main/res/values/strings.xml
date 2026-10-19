@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">Convert JPG to HEIC by Ray</string>
+    <string name="app_name">Convert Media by Ray</string>
 
     <string name="section_range">Date range</string>
     <string name="section_options">Options</string>
@@ -24,6 +24,30 @@
 
     <string name="opt_delete_originals">Delete originals after converting</string>
 
+    <string name="opt_trash">Move originals to the trash instead of deleting</string>
+    <string name="opt_trash_hint">They can be restored from the gallery\'s trash for 30 days. The space
+        only comes back when the trash empties.</string>
+    <string name="opt_keep_screen_on">Keep the screen on while converting</string>
+    <string name="opt_keep_screen_on_hint">With the screen off the phone runs the app on its slow cores:
+        a song that takes a minute takes ten or more.</string>
+    <string name="opt_only_charging">Only while charging</string>
+    <string name="opt_only_charging_hint">A run pauses when the charger is unplugged and carries on when
+        it is back. Runs always pause while the phone is too hot.</string>
+    <string name="exclude_button">Folders to leave alone…</string>
+    <string name="exclude_hint">Left alone: %1$s</string>
+    <string name="exclude_title">Folders to leave alone</string>
+    <string name="exclude_message">One folder per line, as it appears under the phone\'s storage, e.g.
+        DCIM/Wallpaper/. Everything inside is left out of every run and the clean-up. Android/ covers
+        the pictures other apps keep for themselves (WhatsApp, for one): a converted copy cannot go
+        back there, and deleting the original breaks that app\'s own records.</string>
+    <string name="exclude_example">Android/\nDCIM/Wallpaper/</string>
+    <string name="action_view_log">View last run\'s log</string>
+    <string name="action_view_log_hint">Every run writes a log: its settings, each file that failed and
+        why, and a closing summary. The 30 newest are kept under
+        Android/data/com.example.convertjpgtoheic/files/logs.</string>
+    <string name="log_none">No run has been logged yet.</string>
+    <string name="log_share">Share</string>
+    <string name="log_close">Close</string>
     <string name="opt_dry_run">Dry run: measure only, change nothing</string>
     <string name="opt_dry_run_hint">Pictures, videos and music are converted to measure the real
         saving, then thrown away. Nothing is added and nothing deleted. Takes as long as a real run.
@@ -96,7 +120,7 @@ This frees
     </plurals>
     <string name="progress_cleanup">Looking for leftovers…</string>
     <string name="action_videos">Convert videos to HEVC</string>
-    <string name="action_videos_hint">Re-encodes videos in this range from H.264 to HEVC, usually
+    <string name="action_videos_hint">Re-encodes videos (MP4, MOV) in this range from H.264 to HEVC, usually
         about half the size. Slow motion, hyperlapse and other special camera modes are left alone.
         Uses the delete and \"only keep if smaller\" options above.</string>
     <string name="videos_title">Convert videos to HEVC?</string>

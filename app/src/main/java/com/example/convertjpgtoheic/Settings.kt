@@ -56,6 +56,33 @@ class Settings(context: Context) {
         }.getOrDefault(MotionPhotoPolicy.KEEP_VIDEO)
         set(value) = prefs.edit { putString(KEY_MOTION_POLICY, value.name) }
 
+    /**
+     * Folders every converter and the clean-up leave alone, as path prefixes under the storage root.
+     * Defaults to `Android/`: the media other apps keep there (WhatsApp's pictures, for one) cannot
+     * be written back where it came from, and deleting the original breaks that app's own records.
+     */
+    var excludedFolders: List<String>
+        get() = (prefs.getString(KEY_EXCLUDED, null) ?: DEFAULT_EXCLUDED).lines()
+            .map { it.trim().trimStart('/') }
+            .filter { it.isNotEmpty() }
+            .map { if (it.endsWith("/")) it else "$it/" }
+        set(value) = prefs.edit { putString(KEY_EXCLUDED, value.joinToString("\n")) }
+
+    /** Move originals to the trash (recoverable for 30 days) instead of deleting them. Defaults off. */
+    var trashInstead: Boolean
+        get() = prefs.getBoolean(KEY_TRASH, false)
+        set(value) = prefs.edit { putBoolean(KEY_TRASH, value) }
+
+    /** Keep the screen on while a run is going: with it off, Samsung confines the app to the slow cores. */
+    var keepScreenOn: Boolean
+        get() = prefs.getBoolean(KEY_KEEP_SCREEN_ON, true)
+        set(value) = prefs.edit { putBoolean(KEY_KEEP_SCREEN_ON, value) }
+
+    /** Pause a run while the phone is not charging. Defaults off. */
+    var onlyWhileCharging: Boolean
+        get() = prefs.getBoolean(KEY_ONLY_CHARGING, false)
+        set(value) = prefs.edit { putBoolean(KEY_ONLY_CHARGING, value) }
+
     /** Last picked range, so reopening the app does not lose it. Null until a range is chosen. */
     var range: DateRange?
         get() {
@@ -86,5 +113,10 @@ class Settings(context: Context) {
         const val KEY_MOTION_POLICY = "motionPolicy"
         const val KEY_RANGE_START = "rangeStart"
         const val KEY_RANGE_END = "rangeEnd"
+        const val KEY_EXCLUDED = "excludedFolders"
+        const val KEY_TRASH = "trashInstead"
+        const val KEY_KEEP_SCREEN_ON = "keepScreenOn"
+        const val KEY_ONLY_CHARGING = "onlyWhileCharging"
+        const val DEFAULT_EXCLUDED = "Android/"
     }
 }

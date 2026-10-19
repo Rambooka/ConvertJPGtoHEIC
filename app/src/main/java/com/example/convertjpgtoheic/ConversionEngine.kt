@@ -18,6 +18,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -95,6 +96,10 @@ data class RunOptions(
      * music take this flag.
      */
     val dryRun: Boolean = false,
+    /** Move originals to the trash (recoverable for 30 days) rather than deleting them. */
+    val trashOriginals: Boolean = false,
+    /** Hold the run while the phone is not charging. */
+    val onlyWhileCharging: Boolean = false,
 )
 
 data class RunProgress(
@@ -125,6 +130,8 @@ data class RunProgress(
     /** Repair runs only: photos fixed so far, by what was wrong with them. */
     val repairedDates: Int = 0,
     val repairedRotations: Int = 0,
+    /** Set while the run is held: not charging, or the phone is too hot. */
+    val pausedReason: String? = null,
     /** Repair runs only: which step is running, since each counts different things. */
     val repairPhase: RepairPhase? = null,
     /** Repair runs only: found to need a fix but waiting for the user to allow it. */
@@ -229,6 +236,8 @@ data class RunReport(
     val skippedTooSmallBytes: Long = 0,
     /** Converted, but shrunk to fit the encoder — so the HEIC is lower resolution than the source. */
     val downscaledToFit: Int = 0,
+    /** PNGs whose transparent areas were filled white: HEIC carries no transparency here. */
+    val flattenedTransparency: Int = 0,
     /** Sample of failure messages, capped — see [failureCount] for the real total. */
     val failures: List<FailedPhoto> = emptyList(),
     val failureCount: Int = 0,
@@ -266,6 +275,8 @@ data class RunReport(
     val musicNoDate: Int = 0,
     /** A measuring run: the tallies say what a real run would do, and nothing was changed. */
     val dryRun: Boolean = false,
+    /** [deletedOriginals] went to the trash, not to deletion. */
+    val trashed: Boolean = false,
     /** Clean-up runs only: leftovers found, by kind; [deletedOriginals] is how many went. */
     val leftoverJpgs: Int = 0,
     val leftoverVideos: Int = 0,
@@ -509,6 +520,7 @@ class ConversionEngine private constructor(context: Context) {
         if (isBusy || hasPendingDeletion) return false
         cancelRequested = false
         currentMode = mode
+        currentOptions = options
         RunLog.start(app, mode, options)
         directWriteWorks = true
         directWriteProven = false
@@ -598,6 +610,7 @@ class ConversionEngine private constructor(context: Context) {
         try {
             for ((index, photo) in photos.withIndex()) {
                 if (cancelRequested) break
+                holdIfNeeded(options)
                 _state.value = UiState.Working(
                     mode,
                     RunProgress(
@@ -823,9 +836,11 @@ class ConversionEngine private constructor(context: Context) {
         mirrored: Boolean,
         outputBytes: Long,
         downscaled: Boolean,
+        flattenedTransparency: Boolean = false,
     ): RunReport = tally.copy(
         converted = tally.converted + 1,
         downscaledToFit = tally.downscaledToFit + if (downscaled) 1 else 0,
+        flattenedTransparency = tally.flattenedTransparency + if (flattenedTransparency) 1 else 0,
         originalBytes = tally.originalBytes + photo.sizeBytes,
         heicBytes = tally.heicBytes + outputBytes,
         // The motion subset of the byte totals; stills fall out as the remainder in the report.
@@ -883,6 +898,7 @@ class ConversionEngine private constructor(context: Context) {
             }
             return countConverted(
                 tally, photo, metadata, motionOutcome, mirrored, success.bytes, success.downscaled,
+                success.flattenedTransparency,
             )
         } finally {
             success.file?.delete()
@@ -915,6 +931,9 @@ class ConversionEngine private constructor(context: Context) {
         var failure: String? = null
         var written = 0L
         var downscaled = false
+        var encodedWidth = 0
+        var encodedHeight = 0
+        var flattened = false
 
         val published = repository.publishHeic(photo) { uri ->
             when (
@@ -930,6 +949,9 @@ class ConversionEngine private constructor(context: Context) {
                 is EncodeResult.Success -> {
                     written = result.bytes
                     downscaled = result.downscaled
+                    encodedWidth = result.width
+                    encodedHeight = result.height
+                    flattened = result.flattenedTransparency
                     result.bytes
                 }
             }
@@ -951,8 +973,14 @@ class ConversionEngine private constructor(context: Context) {
             return tally.copy(skippedNotSmaller = tally.skippedNotSmaller + 1)
         }
 
+        // The original is about to be offered for deletion, so the copy has to decode first.
+        encoder.verifyWritten(published.uri, encodedWidth, encodedHeight)?.let { problem ->
+            repository.discard(published.uri)
+            return tally.withFailure(photo, "$problem; the original was left alone")
+        }
+
         toDelete += photo.uri
-        val counted = countConverted(tally, photo, metadata, motionOutcome, mirrored, written, downscaled)
+        val counted = countConverted(tally, photo, metadata, motionOutcome, mirrored, written, downscaled, flattened)
         return if (published.datesApplied) {
             counted
         } else {
@@ -1053,7 +1081,7 @@ class ConversionEngine private constructor(context: Context) {
         // Only once its original is really gone may a copy take the original's name.
         val gone = answer.accepted.toHashSet()
         for ((video, copy) in strandedVideos) {
-            if (video.uri in gone) repository.renameVideo(copy, video.displayName)
+            if (video.uri in gone) repository.renameVideo(copy, video.finalName)
         }
         finish(
             RunReport(
@@ -1185,6 +1213,7 @@ class ConversionEngine private constructor(context: Context) {
 
         for ((index, video) in videos.withIndex()) {
             if (cancelRequested) break
+            holdIfNeeded(options)
             progress(index, video, 0f)
             try {
                 when (val check = videoConverter.check(video)) {
@@ -1264,7 +1293,7 @@ class ConversionEngine private constructor(context: Context) {
             if (options.dryRun) return countMeasured(tally, video.sizeBytes, bytes)
             val published = repository.publishVideo(video, staged)
                 ?: return tally.withFailure(video.uri, video.displayName, video.sizeBytes, "could not be saved to the gallery")
-            if (options.deleteOriginals) waiting[video.uri] = published to video.displayName
+            if (options.deleteOriginals) waiting[video.uri] = published to video.finalName
             return tally.copy(
                 converted = tally.converted + 1,
                 originalBytes = tally.originalBytes + video.sizeBytes,
@@ -1343,6 +1372,7 @@ class ConversionEngine private constructor(context: Context) {
 
         for ((index, track) in tracks.withIndex()) {
             if (cancelRequested) break
+            holdIfNeeded(options)
             progress(index, track, 0f)
             try {
                 tally = convertOneTrack(options, track, tally, waiting) { progress(index, track, it) }
@@ -1766,10 +1796,58 @@ class ConversionEngine private constructor(context: Context) {
         _deletionRequest.value = batch
     }
 
+    /**
+     * Holds the run while [holdReason] gives one, showing why, and returns once it does not — or at
+     * once on cancel. Called between items, so a held run finishes the item it was on.
+     */
+    private suspend fun holdIfNeeded(options: RunOptions) {
+        var held = false
+        while (!cancelRequested) {
+            val reason = holdReason(options)
+            if (reason == null) {
+                if (held) clearHold()
+                return
+            }
+            held = true
+            val s = _state.value
+            if (s is UiState.Working && s.progress.pausedReason != reason) {
+                _state.value = s.copy(progress = s.progress.copy(pausedReason = reason))
+                RunLog.line("held: $reason")
+            }
+            delay(HOLD_POLL_MS)
+        }
+    }
+
+    private fun clearHold() {
+        val s = _state.value
+        if (s is UiState.Working && s.progress.pausedReason != null) {
+            _state.value = s.copy(progress = s.progress.copy(pausedReason = null))
+        }
+        RunLog.line("resumed")
+    }
+
+    /** Why a run should wait right now, or null. Heat is always respected; the charger is an option. */
+    private fun holdReason(options: RunOptions): String? {
+        if (options.onlyWhileCharging) {
+            val battery = app.getSystemService(android.os.BatteryManager::class.java)
+            if (battery != null && !battery.isCharging) return "waiting for the charger"
+        }
+        val power = app.getSystemService(android.os.PowerManager::class.java)
+        if (power != null && power.currentThermalStatus >= android.os.PowerManager.THERMAL_STATUS_SEVERE) {
+            return "letting the phone cool down"
+        }
+        return null
+    }
+
+    /** The options of the run going now, for the parts of it that happen outside its loop. */
+    @Volatile
+    private var currentOptions: RunOptions? = null
+
     /** The run is over: record it in the run log, then publish it. */
     private fun finish(report: RunReport) {
-        RunLog.finish(report)
-        _state.value = UiState.Finished(report)
+        val full = report.copy(trashed = currentOptions?.trashOriginals == true && report.deletedOriginals > 0)
+        RunLog.finish(full)
+        _state.value = UiState.Finished(full)
     }
 
     /**
@@ -1828,9 +1906,11 @@ class ConversionEngine private constructor(context: Context) {
         return ManualDateResult.Done(taken)
     }
 
-    /** The system dialog for [request] — delete, or allow the app to modify. */
+    /** The system dialog for [request] — delete (or trash, if the run asked for that), or allow the app to modify. */
     fun createConsentIntentSender(request: DeletionRequest) = when (request.kind) {
-        ConsentKind.DELETE -> MediaStore.createDeleteRequest(app.contentResolver, request.uris)
+        ConsentKind.DELETE ->
+            if (currentOptions?.trashOriginals == true) MediaStore.createTrashRequest(app.contentResolver, request.uris, true)
+            else MediaStore.createDeleteRequest(app.contentResolver, request.uris)
         ConsentKind.MODIFY -> MediaStore.createWriteRequest(app.contentResolver, request.uris)
     }.intentSender
 
@@ -1876,6 +1956,9 @@ class ConversionEngine private constructor(context: Context) {
 
     companion object {
         private const val TAG = "ConversionEngine"
+
+        /** How often a held run looks again at the charger and the temperature. */
+        private const val HOLD_POLL_MS = 15_000L
 
         /** How long a consent dialog must have been up before a resume counts it as dismissed. */
         private const val ABANDONED_AFTER_MS = 2_000L

@@ -1,6 +1,7 @@
 package com.example.convertjpgtoheic
 
 import android.content.Context
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Handler
 import android.os.HandlerThread
@@ -42,6 +43,9 @@ data class SourceVideo(
     /** What the converted copy is called while the original still exists beside it. */
     val convertedName: String get() = "${baseName}$CONVERTED_SUFFIX.mp4"
 
+    /** What it is called once the original is gone: the original's name, as `.mp4` — a `.mov` source becomes `name.mp4`. */
+    val finalName: String get() = "$baseName.mp4"
+
     companion object {
         const val CONVERTED_SUFFIX = "_HEVC"
     }
@@ -81,7 +85,10 @@ class VideoConverter(private val context: Context) {
 
     /** Decides whether [video] should be converted, from MediaStore and its own MP4 boxes. */
     fun check(video: SourceVideo): Check {
-        if (video.mimeType != "video/mp4") return Check.Skip(SkipKind.FORMAT, "not an MP4 (${video.mimeType})")
+        // QuickTime is the same box structure under another brand; MediaExtractor reads both.
+        if (video.mimeType != "video/mp4" && video.mimeType != "video/quicktime") {
+            return Check.Skip(SkipKind.FORMAT, "not an MP4 or MOV (${video.mimeType})")
+        }
         val capture = video.captureFramerate
         if (capture != null && capture > MAX_NORMAL_CAPTURE_FPS) {
             return Check.Skip(SkipKind.SPECIAL, "slow motion (captured at ${capture.toInt()} fps)")
@@ -136,6 +143,9 @@ class VideoConverter(private val context: Context) {
                 val problem = verify(source, Mp4Metadata.read(RafByteSource(file)), captured)
                 if (problem != null) return fail(out, problem)
             }
+            // The boxes being right says nothing about the pictures in them: decode one from the
+            // middle, as a player would.
+            if (!decodesAFrame(out, source.durationSeconds ?: 0.0)) return fail(out, "the new video could not be decoded")
         } catch (e: Exception) {
             Log.w(TAG, "Could not finish ${video.displayName}", e)
             return fail(out, "the new file could not be finished — ${e.message ?: e.javaClass.simpleName}")
@@ -177,6 +187,17 @@ class VideoConverter(private val context: Context) {
         if (captured != null && written.creationTime != captured) return "the capture time could not be set"
         if (source.location != null && written.location == null) return "the location would be lost"
         return null
+    }
+
+    private fun decodesAFrame(file: File, durationSeconds: Double): Boolean = try {
+        MediaMetadataRetriever().use { r ->
+            r.setDataSource(file.path)
+            val middleUs = (durationSeconds * 500_000).toLong()
+            r.getFrameAtTime(middleUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)?.also { it.recycle() } != null
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "Could not decode a frame of ${file.name}", e)
+        false
     }
 
     private fun close(original: Double, copy: Double): Boolean =

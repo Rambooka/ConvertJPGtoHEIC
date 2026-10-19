@@ -42,6 +42,10 @@ object RunLog {
         }
     }
 
+    /** The newest run's file, or null if there is none yet. */
+    fun latest(context: Context): File? =
+        context.getExternalFilesDir("logs")?.listFiles { f -> f.name.startsWith("run-") }?.maxByOrNull { it.name }
+
     /** One timestamped line; nothing if no run is being logged. */
     @Synchronized
     fun line(text: String) {

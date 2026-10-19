@@ -85,7 +85,7 @@ class ConversionService : Service() {
                 when (state) {
                     is UiState.Working -> notifyProgress(
                         buildNotification(
-                            text = if (state.mode == RunMode.REPAIR) {
+                            text = state.progress.pausedReason?.let { "Paused — $it" } ?: if (state.mode == RunMode.REPAIR) {
                                 repairNotificationText(state.progress)
                             } else if (state.mode == RunMode.VIDEO || state.mode == RunMode.MUSIC) {
                                 "${state.progress.currentName} · ${(state.progress.itemFraction * 100).toInt()}%" +
@@ -331,6 +331,8 @@ class ConversionService : Service() {
         private const val EXTRA_END = "end_ms"
         private const val EXTRA_QUALITY = "quality"
         private const val EXTRA_DRY_RUN = "dryRun"
+        private const val EXTRA_TRASH = "trash"
+        private const val EXTRA_ONLY_CHARGING = "onlyCharging"
         private const val EXTRA_DELETE = "delete"
         private const val EXTRA_ONLY_SMALLER = "only_smaller"
         private const val EXTRA_SKIP_SMALL = "skip_small"
@@ -365,6 +367,8 @@ class ConversionService : Service() {
                 .putExtra(EXTRA_SKIP_EXISTING, options.skipAlreadyConverted)
                 .putExtra(EXTRA_MOTION_POLICY, options.motionPolicy.name)
                 .putExtra(EXTRA_DRY_RUN, options.dryRun)
+                .putExtra(EXTRA_TRASH, options.trashOriginals)
+                .putExtra(EXTRA_ONLY_CHARGING, options.onlyWhileCharging)
             ContextCompat.startForegroundService(context, intent)
         }
 
@@ -381,6 +385,8 @@ class ConversionService : Service() {
                 MotionPhotoPolicy.valueOf(getStringExtra(EXTRA_MOTION_POLICY) ?: "")
             }.getOrDefault(MotionPhotoPolicy.KEEP_VIDEO),
             dryRun = getBooleanExtra(EXTRA_DRY_RUN, false),
+            trashOriginals = getBooleanExtra(EXTRA_TRASH, false),
+            onlyWhileCharging = getBooleanExtra(EXTRA_ONLY_CHARGING, false),
         )
     }
 }

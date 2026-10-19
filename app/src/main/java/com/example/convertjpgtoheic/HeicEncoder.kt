@@ -48,6 +48,8 @@ sealed interface EncodeResult {
         val file: File? = null,
         /** The image was shrunk to fit the encoder, so [width]x[height] is smaller than the source. */
         val downscaled: Boolean = false,
+        /** A PNG with transparent areas: they were filled white, as HEIC has no transparency here. */
+        val flattenedTransparency: Boolean = false,
     ) : EncodeResult
 
     data class Failure(val reason: String) : EncodeResult
@@ -282,7 +284,9 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
                 }
                 bytes = sizeOf(target)
             }
-            EncodeResult.Success(bytes, width, height, (target as? HeicTarget.Staging)?.file, decoded.downscaled)
+            EncodeResult.Success(
+                bytes, width, height, (target as? HeicTarget.Staging)?.file, decoded.downscaled, decoded.flattenedTransparency,
+            )
         } catch (e: EncoderStalled) {
             stillInUse = true
             EncodeResult.Failure("the encoder stopped responding (gave up after ${ENCODE_TIMEOUT_MS / 1000} s)")
@@ -336,7 +340,7 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
     }
 
     /** A decoded image plus whether it had to be shrunk on the way in. */
-    private class Decoded(val bitmap: Bitmap, val downscaled: Boolean)
+    private class Decoded(val bitmap: Bitmap, val downscaled: Boolean, val flattenedTransparency: Boolean = false)
 
     /**
      * Refuses up front if this image cannot be encoded — too big for memory, or (unless
@@ -433,11 +437,30 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
             ?: return null
         // HeifWriter writes no alpha channel, so transparent areas would come out black. White
         // behind them instead, as a viewer shows a transparent PNG. Opaque pixels are unchanged.
+        var flattened = false
         if (bitmap.hasAlpha() && bitmap.isMutable) {
+            // Only counted when something was actually see-through: most PNGs carry an alpha
+            // channel that is opaque everywhere.
+            flattened = hasTransparentPixels(bitmap)
             Canvas(bitmap).drawColor(Color.WHITE, PorterDuff.Mode.DST_OVER)
             bitmap.setHasAlpha(false)
         }
-        return Decoded(bitmap, downscaled = sampleSize > 1)
+        return Decoded(bitmap, downscaled = sampleSize > 1, flattenedTransparency = flattened)
+    }
+
+    /** Whether any pixel of [bitmap] is less than fully opaque, sampled on a grid, so a huge PNG costs little. */
+    private fun hasTransparentPixels(bitmap: Bitmap): Boolean {
+        val step = maxOf(1, maxOf(bitmap.width, bitmap.height) / ALPHA_SAMPLE_GRID)
+        var y = 0
+        while (y < bitmap.height) {
+            var x = 0
+            while (x < bitmap.width) {
+                if (bitmap.getPixel(x, y) ushr 24 != 0xFF) return true
+                x += step
+            }
+            y += step
+        }
+        return false
     }
 
     /**
@@ -563,6 +586,37 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
         }
     }
 
+    /**
+     * Why the HEIC just written at [uri] is not a sound copy, or null if it is.
+     *
+     * Music is read back and video re-read before an original goes; a HEIC only had to be bigger
+     * than nothing. This decodes the file as a viewer would: its header must give the encoded
+     * size (either way round, since the decoder may apply the container rotation), and the whole
+     * image must decode — at a sixty-fourth of its pixels, enough to reach every tile.
+     */
+    fun verifyWritten(uri: android.net.Uri, width: Int, height: Int): String? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        repository.openOriginal(uri, requireOriginal = false)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+            ?: return "the new file could not be opened"
+        val w = bounds.outWidth
+        val h = bounds.outHeight
+        if (!((w == width && h == height) || (w == height && h == width))) {
+            return "the new file reads as ${w}x$h, not ${width}x$height"
+        }
+        val sample = BitmapFactory.Options().apply {
+            inSampleSize = VERIFY_SAMPLE
+            inPreferredConfig = Bitmap.Config.RGB_565
+        }
+        val decoded = try {
+            repository.openOriginal(uri, requireOriginal = false)?.use { BitmapFactory.decodeStream(it, null, sample) }
+        } catch (e: Exception) {
+            Log.w(TAG, "Read-back failed for $uri", e)
+            null
+        } ?: return "the new file does not decode"
+        decoded.recycle()
+        return null
+    }
+
     /** Clears anything a crashed or cancelled run left behind. */
     fun clearStaging() {
         runCatching { cacheDir.listFiles()?.forEach { it.delete() } }
@@ -590,6 +644,12 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
 
         /** ARGB_8888. */
         private const val BYTES_PER_PIXEL = 4
+
+        /** Transparency is looked for on at most this many points along the longer side. */
+        private const val ALPHA_SAMPLE_GRID = 256
+
+        /** Read-back decodes at 1/8 on each side: every tile is touched for a sixty-fourth of the work. */
+        private const val VERIFY_SAMPLE = 8
 
         /** Spend only this share of free memory on the bitmap, leaving room for the encoder's own
          *  buffers and other apps rather than driving the device to zero. */

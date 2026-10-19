@@ -178,6 +178,67 @@
             android:checked="true"
             android:text="@string/opt_delete_originals" />
 
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/switchTrash"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:checked="false"
+            android:text="@string/opt_trash" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:text="@string/opt_trash_hint"
+            android:textAppearance="?attr/textAppearanceBodySmall" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/switchKeepScreenOn"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:checked="true"
+            android:text="@string/opt_keep_screen_on" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:text="@string/opt_keep_screen_on_hint"
+            android:textAppearance="?attr/textAppearanceBodySmall" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/switchOnlyCharging"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:checked="false"
+            android:text="@string/opt_only_charging" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:text="@string/opt_only_charging_hint"
+            android:textAppearance="?attr/textAppearanceBodySmall" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/excludeFoldersButton"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/exclude_button" />
+
+        <TextView
+            android:id="@+id/excludeFoldersHint"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:textAppearance="?attr/textAppearanceBodySmall"
+            tools:text="Left alone: Android/" />
+
         <!-- Not restored from settings: left on, it would make every run quietly do nothing. -->
         <com.google.android.material.materialswitch.MaterialSwitch
             android:id="@+id/switchDryRun"
@@ -292,6 +353,21 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
             android:text="@string/action_cleanup" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="@string/action_view_log_hint"
+            android:textAppearance="?attr/textAppearanceBodySmall" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/viewLogButton"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="@string/action_view_log" />
 
         <!-- Run controls: shown only while a run is going, so beside its progress. -->
         <com.google.android.material.button.MaterialButton
