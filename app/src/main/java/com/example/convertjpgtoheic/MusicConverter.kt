@@ -267,6 +267,14 @@ class MusicConverter(private val context: Context) {
             var lastActivity = SystemClock.elapsedRealtime()
             var lastProgress = 0L
 
+            // Where the time goes, for the per-song log line: the pipeline's stages are polled in
+            // turn, so each lap is one stage's share.
+            val started = SystemClock.elapsedRealtime()
+            var tMark = System.nanoTime()
+            fun lap(): Long { val now = System.nanoTime(); val d = now - tMark; tMark = now; return d }
+            var tFeed = 0L; var tDecode = 0L; var tResample = 0L; var tEncodeIn = 0L; var tEncodeOut = 0L; var tIdle = 0L
+            var loops = 0L
+
             fun setUp(format: MediaFormat) {
                 val rate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
                 val ch = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
@@ -299,6 +307,8 @@ class MusicConverter(private val context: Context) {
             // pipeline at one buffer per stage per wait.
             while (!encoderDone) {
                 var moved = false
+                loops++
+                lap()
 
                 // Compressed frames into the decoder.
                 while (!extractorDone) {
@@ -315,6 +325,7 @@ class MusicConverter(private val context: Context) {
                     }
                     moved = true
                 }
+                tFeed += lap()
 
                 // PCM out of the decoder, resampled, into the queue — unless the encoder is behind.
                 while (!decoderDone && pcm.size < MAX_PENDING_BYTES) {
@@ -337,7 +348,9 @@ class MusicConverter(private val context: Context) {
                             } else {
                                 val shorts = ShortArray(frames * channels)
                                 buf.order(ByteOrder.nativeOrder()).asShortBuffer().get(shorts)
+                                val r0 = System.nanoTime()
                                 pcm.write(toPcm16(rs.process(FloatArray(shorts.size) { shorts[it] / 32768f }, frames)))
+                                tResample += System.nanoTime() - r0
                             }
                         }
                         dec.releaseOutputBuffer(i, false)
@@ -347,6 +360,8 @@ class MusicConverter(private val context: Context) {
                         }
                     }
                 }
+
+                tDecode += lap()
 
                 val enc = encoder
                 if (enc == null) {
@@ -371,6 +386,7 @@ class MusicConverter(private val context: Context) {
                         }
                         moved = true
                     }
+                    tEncodeIn += lap()
 
                     // Opus packets out of the encoder into the Ogg file.
                     while (!encoderDone) {
@@ -397,6 +413,7 @@ class MusicConverter(private val context: Context) {
                     }
                 }
 
+                tEncodeOut += lap()
                 val now = SystemClock.elapsedRealtime()
                 if (moved) {
                     lastActivity = now
@@ -405,6 +422,7 @@ class MusicConverter(private val context: Context) {
                 } else {
                     // The codecs work on their own threads; give them a moment.
                     Thread.sleep(IDLE_SLEEP_MS)
+                    tIdle += lap()
                 }
                 if (now - lastProgress > PROGRESS_MS && expectedUs > 0 && inRate > 0) {
                     lastProgress = now
@@ -419,7 +437,9 @@ class MusicConverter(private val context: Context) {
             note(
                 "${track.displayName}: ${dec.name} · $extractorSamples frames in, last at ${lastSampleUs / 1000} ms · " +
                     "$decodedFrames samples out from ${firstOutputUs / 1000} ms = ${decodedUs / 1000} ms · " +
-                    "file says ${expectedUs / 1000} ms",
+                    "file says ${expectedUs / 1000} ms · took ${(SystemClock.elapsedRealtime() - started) / 1000.0} s: " +
+                    "feed ${sec(tFeed)} · decode ${sec(tDecode)} (resample ${sec(tResample)}) · encode in ${sec(tEncodeIn)} · " +
+                    "encode out ${sec(tEncodeOut)} · idle ${sec(tIdle)} · $loops loops",
             )
             // The copy is later checked against what was decoded, so what was decoded has to be the
             // whole song: Samsung's FLAC extractor once ended streams up to 47 s early, unnoticed.
@@ -546,6 +566,8 @@ class MusicConverter(private val context: Context) {
         }
         return MediaCodec.createDecoderByType(mime)
     }
+
+    private fun sec(nanos: Long): String = "%.1f".format(nanos / 1e9)
 
     /** To logcat and the run's own log. */
     private fun note(message: String) {
