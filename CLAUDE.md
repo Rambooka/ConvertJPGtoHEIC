@@ -41,12 +41,12 @@ into the scratchpad, never into the repo.
 Branch **`fix/music-oversized-cover-art`**: 22 commits, pushed, **not merged to `main`** (the user
 has not chosen PR or direct merge). The earlier photo/video branch is merged.
 
-### Not yet on the phone
+### On the phone
 
 `4bbfb6f` (the fresh-eyes batch: folder exclusions, HEIC read-back, trash, keep-screen-on,
-charging/heat holds, log viewer, PNG transparency count, .mov, app name) is built — both APKs —
-but a run was going, so it is **not installed** and its device tests have not run. Install both,
-run the tests, then check the first real run's log shows the read-back costing little.
+charging/heat holds, log viewer, PNG transparency count, .mov, app name) is installed; its 5
+device tests pass. Still to see on a real run: that the HEIC read-back costs little, and the
+charging/heat hold and trash dialog in practice.
 
 **WhatsApp (fixed by hand, 20 Oct):** the photo run had converted 17 pictures from
 `Android/media/com.whatsapp/…/WhatsApp Images/`, could not write the copies back there (the
