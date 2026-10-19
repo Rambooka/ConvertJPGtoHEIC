@@ -137,12 +137,14 @@ internal object JpgQuery {
     private val MODIFIED = MediaStore.Images.Media.DATE_MODIFIED
 
     val selection: String =
-        "($MIME = ? OR $MIME = ?) AND " +
+        "$MIME IN (?, ?, ?) AND " +
             "(($TAKEN IS NOT NULL AND $TAKEN > 0 AND $TAKEN BETWEEN ? AND ?) OR " +
             "(($TAKEN IS NULL OR $TAKEN <= 0) AND $MODIFIED BETWEEN ? AND ?))"
 
     fun args(startMs: Long, endMs: Long): Array<String> = arrayOf(
-        "image/jpeg", "image/jpg",
+        // PNG too: BitmapFactory decodes it the same way, and with no EXIF of its own it gets the
+        // date-only block a bare JPG does.
+        "image/jpeg", "image/jpg", "image/png",
         startMs.toString(), endMs.toString(),
         // DATE_MODIFIED is stored in seconds, DATE_TAKEN in milliseconds.
         (startMs / 1000).toString(), (endMs / 1000).toString(),
@@ -172,7 +174,7 @@ class PhotoRepository(private val context: Context) {
     private val collection: Uri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
 
     /**
-     * JPGs whose capture date falls inside [startMs]..[endMs], both ends inclusive.
+     * JPGs and PNGs whose capture date falls inside [startMs]..[endMs], both ends inclusive.
      *
      * Screenshots and downloaded images routinely have a null DATE_TAKEN, so for those rows the
      * range is matched against DATE_MODIFIED instead — a plain `DATE_TAKEN BETWEEN ...` would

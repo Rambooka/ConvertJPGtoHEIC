@@ -4,6 +4,9 @@ import android.app.ActivityManager
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.PorterDuff
 import android.opengl.EGL14
 import android.opengl.EGLConfig
 import android.opengl.GLES20
@@ -411,14 +414,23 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
             }
         }
 
+        val png = photo.displayName.endsWith(".png", ignoreCase = true)
         val options = BitmapFactory.Options().apply {
             inPreferredConfig = Bitmap.Config.ARGB_8888
             inSampleSize = sampleSize
+            // Mutable so transparency can be filled in place, without a second full-size bitmap.
+            inMutable = png
         }
         // Redaction only strips metadata, never pixels, so the decode does not need the original.
         val bitmap = repository.openOriginal(photo.uri, requireOriginal = false)
             ?.use { BitmapFactory.decodeStream(it, null, options) }
             ?: return null
+        // HeifWriter writes no alpha channel, so transparent areas would come out black. White
+        // behind them instead, as a viewer shows a transparent PNG. Opaque pixels are unchanged.
+        if (bitmap.hasAlpha() && bitmap.isMutable) {
+            Canvas(bitmap).drawColor(Color.WHITE, PorterDuff.Mode.DST_OVER)
+            bitmap.setHasAlpha(false)
+        }
         return Decoded(bitmap, downscaled = sampleSize > 1)
     }
 

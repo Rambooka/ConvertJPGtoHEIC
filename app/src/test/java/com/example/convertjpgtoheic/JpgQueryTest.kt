@@ -26,18 +26,19 @@ class JpgQueryTest {
 
         val args = JpgQuery.args(start, end)
 
-        assertEquals(start.toString(), args[2])
-        assertEquals(end.toString(), args[3])
-        assertEquals((start / 1000).toString(), args[4])
-        assertEquals((end / 1000).toString(), args[5])
+        assertEquals(start.toString(), args[3])
+        assertEquals(end.toString(), args[4])
+        assertEquals((start / 1000).toString(), args[5])
+        assertEquals((end / 1000).toString(), args[6])
     }
 
     @Test
-    fun `matches both jpeg mime spellings`() {
+    fun `matches both jpeg mime spellings, and png`() {
         val args = JpgQuery.args(0L, 1L)
 
         assertTrue(args.contains("image/jpeg"))
         assertTrue(args.contains("image/jpg"))
+        assertTrue(args.contains("image/png"))
     }
 
     @Test
