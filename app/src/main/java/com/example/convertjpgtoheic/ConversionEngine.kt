@@ -277,7 +277,7 @@ data class RunReport(
      * Kept in the same list as the per-photo ones (with an empty [FailedPhoto.uri]) so the report
      * has one place to look; the UI shows these as a plain reason, with no view/delete buttons.
      */
-    fun withFailure(reason: String): RunReport = copy(
+    fun withFailure(reason: String): RunReport = also { RunLog.line("FAILED (run) · $reason") }.copy(
         failures = if (failures.size < MAX_RETAINED_FAILURES) {
             failures + FailedPhoto(Uri.EMPTY, "", 0, reason)
         } else {
@@ -294,7 +294,8 @@ data class RunReport(
      * would build thousands of entries the UI never shows. Only a sample is kept; [failureCount]
      * stays exact.
      */
-    fun withFailure(photo: SourcePhoto, reason: String): RunReport = copy(
+    fun withFailure(photo: SourcePhoto, reason: String): RunReport =
+        also { RunLog.line("FAILED ${photo.relativePath}${photo.displayName} · $reason") }.copy(
         failures = if (failures.size < MAX_RETAINED_FAILURES) {
             failures + FailedPhoto(photo.uri, photo.displayName, photo.sizeBytes, reason)
         } else {
@@ -304,7 +305,8 @@ data class RunReport(
     )
 
     /** As [withFailure] for a photo, for files that are not conversion sources (a repair). */
-    fun withFailure(uri: Uri, name: String, sizeBytes: Long, reason: String): RunReport = copy(
+    fun withFailure(uri: Uri, name: String, sizeBytes: Long, reason: String): RunReport =
+        also { RunLog.line("FAILED $name · $reason") }.copy(
         failures = if (failures.size < MAX_RETAINED_FAILURES) {
             failures + FailedPhoto(uri, name, sizeBytes, reason)
         } else {
@@ -507,6 +509,7 @@ class ConversionEngine private constructor(context: Context) {
         if (isBusy || hasPendingDeletion) return false
         cancelRequested = false
         currentMode = mode
+        RunLog.start(app, mode, options)
         directWriteWorks = true
         directWriteProven = false
         // See the note in scan(): the observer must never replay a stale Finished.
@@ -548,14 +551,14 @@ class ConversionEngine private constructor(context: Context) {
         )
         synchronized(deletionLock) { pendingDeletion?.outcome?.complete(false) }
         _deletionRequest.value = null
-        _state.value = UiState.Finished(failed)
+        finish(failed)
     }
 
     // region conversion
 
     private suspend fun convert(mode: RunMode, options: RunOptions) {
         if (!EncoderSupport.hasHevcEncoder) {
-            _state.value = UiState.Finished(RunReport(mode).withFailure(NO_ENCODER))
+            finish(RunReport(mode).withFailure(NO_ENCODER))
             return
         }
 
@@ -564,7 +567,7 @@ class ConversionEngine private constructor(context: Context) {
         // instead of producing thousands of identical errors.
         val free = encoder.freeStagingBytes()
         if (free in 0 until MIN_FREE_SPACE_BYTES) {
-            _state.value = UiState.Finished(
+            finish(
                 RunReport(mode).withFailure(
                     "Only ${free / (1024 * 1024)} MB of storage free. Free up space, or use " +
                         "\"Clean up leftovers\" to remove JPGs that already have a HEIC."
@@ -575,7 +578,7 @@ class ConversionEngine private constructor(context: Context) {
 
         val photos = repository.queryJpgs(options.startMs, options.endMs)
         if (photos.isEmpty()) {
-            _state.value = UiState.Finished(RunReport(mode))
+            finish(RunReport(mode))
             return
         }
 
@@ -739,7 +742,7 @@ class ConversionEngine private constructor(context: Context) {
             if (!answer.granted) declined = true
         }
 
-        _state.value = UiState.Finished(
+        finish(
             tally.copy(
                 cancelled = cancelRequested || endedEarly,
                 deletedOriginals = deletedTotal,
@@ -1034,12 +1037,12 @@ class ConversionEngine private constructor(context: Context) {
         val strandedVideos = if (cancelRequested) emptyList() else repository.findStrandedVideos(range)
         val strandedMp3s = if (cancelRequested) emptyList() else repository.findStrandedMp3s()
         if (cancelRequested) {
-            _state.value = UiState.Finished(RunReport(RunMode.CLEAN_UP, cancelled = true))
+            finish(RunReport(RunMode.CLEAN_UP, cancelled = true))
             return
         }
         val total = stranded.size + strandedVideos.size + strandedMp3s.size
         if (total == 0) {
-            _state.value = UiState.Finished(RunReport(RunMode.CLEAN_UP))
+            finish(RunReport(RunMode.CLEAN_UP))
             return
         }
 
@@ -1052,7 +1055,7 @@ class ConversionEngine private constructor(context: Context) {
         for ((video, copy) in strandedVideos) {
             if (video.uri in gone) repository.renameVideo(copy, video.displayName)
         }
-        _state.value = UiState.Finished(
+        finish(
             RunReport(
                 RunMode.CLEAN_UP,
                 originalBytes = stranded.sumOf { it.sizeBytes } + strandedVideos.sumOf { it.first.sizeBytes } +
@@ -1123,12 +1126,12 @@ class ConversionEngine private constructor(context: Context) {
     private suspend fun convertVideos(options: RunOptions) {
         val mode = RunMode.VIDEO
         if (!EncoderSupport.hasHevcEncoder) {
-            _state.value = UiState.Finished(RunReport(mode).withFailure(NO_ENCODER))
+            finish(RunReport(mode).withFailure(NO_ENCODER))
             return
         }
         val videos = repository.queryVideos(options.startMs, options.endMs)
         if (videos.isEmpty()) {
-            _state.value = UiState.Finished(RunReport(mode))
+            finish(RunReport(mode))
             return
         }
         if (!videoStaging.isDirectory) videoStaging.mkdirs()
@@ -1207,7 +1210,7 @@ class ConversionEngine private constructor(context: Context) {
         if (deleteAsWeGo && !declined) flushDeletions(videos.size)
         videoStaging.listFiles()?.forEach { it.delete() }
 
-        _state.value = UiState.Finished(
+        finish(
             tally.copy(
                 dryRun = options.dryRun,
                 cancelled = cancelRequested,
@@ -1286,14 +1289,14 @@ class ConversionEngine private constructor(context: Context) {
     private suspend fun convertMusic(options: RunOptions) {
         val mode = RunMode.MUSIC
         if (!EncoderSupport.hasOpusEncoder) {
-            _state.value = UiState.Finished(RunReport(mode).withFailure(NO_OPUS_ENCODER))
+            finish(RunReport(mode).withFailure(NO_OPUS_ENCODER))
             return
         }
         // Copies made before the switch from `.ogg` first, so they count as already converted.
         val renamed = repository.renameOwnOggsToOpus()
         val tracks = repository.queryMusicToConvert()
         if (tracks.isEmpty()) {
-            _state.value = UiState.Finished(RunReport(mode, musicRenamed = renamed))
+            finish(RunReport(mode, musicRenamed = renamed))
             return
         }
         if (!musicStaging.isDirectory) musicStaging.mkdirs()
@@ -1355,7 +1358,7 @@ class ConversionEngine private constructor(context: Context) {
         if (deleteAsWeGo && !declined) flushDeletions(tracks.size)
         musicStaging.listFiles()?.forEach { it.delete() }
 
-        _state.value = UiState.Finished(
+        finish(
             tally.copy(
                 dryRun = options.dryRun,
                 cancelled = cancelRequested,
@@ -1423,7 +1426,7 @@ class ConversionEngine private constructor(context: Context) {
         val mode = RunMode.REPAIR
         val rows = repository.queryHeics()
         if (rows.isEmpty()) {
-            _state.value = UiState.Finished(RunReport(mode))
+            finish(RunReport(mode))
             return
         }
         val knownTimes = PhotoRepository.withTwinTimes(
@@ -1525,7 +1528,7 @@ class ConversionEngine private constructor(context: Context) {
         val verified = confirmRepairs(repaired) { done, total, eta ->
             progress(RepairPhase.REFRESHING, done, total, "", eta)
         }
-        _state.value = UiState.Finished(
+        finish(
             tally.copy(
                 cancelled = cancelRequested,
                 repairedDates = verified.dates,
@@ -1544,7 +1547,7 @@ class ConversionEngine private constructor(context: Context) {
         val mode = RunMode.MUSIC_REPAIR
         val rows = repository.queryOpus()
         if (rows.isEmpty()) {
-            _state.value = UiState.Finished(RunReport(mode))
+            finish(RunReport(mode))
             return
         }
 
@@ -1636,7 +1639,7 @@ class ConversionEngine private constructor(context: Context) {
             years = repository.musicYears(repaired.map { it.id })
         }
         val showing = repaired.count { years[it.id] != null }
-        _state.value = UiState.Finished(
+        finish(
             tally.copy(
                 cancelled = cancelRequested,
                 musicYearsFixed = showing,
@@ -1650,12 +1653,12 @@ class ConversionEngine private constructor(context: Context) {
         val mode = RunMode.DELETE_PROTECTED
         val songs = repository.queryProtectedSongs()
         if (songs.isEmpty() || cancelRequested) {
-            _state.value = UiState.Finished(RunReport(mode, cancelled = cancelRequested))
+            finish(RunReport(mode, cancelled = cancelRequested))
             return
         }
         _state.value = UiState.AwaitingDeletion(mode, 0, songs.size, songs.size)
         val answer = confirmDeletion(songs.map { it.uri })
-        _state.value = UiState.Finished(
+        finish(
             RunReport(
                 mode,
                 protectedFound = songs.size,
@@ -1761,6 +1764,12 @@ class ConversionEngine private constructor(context: Context) {
             else request.batches.getOrNull(request.index)?.let { DeletionRequest(it, request.kind) }
         }
         _deletionRequest.value = batch
+    }
+
+    /** The run is over: record it in the run log, then publish it. */
+    private fun finish(report: RunReport) {
+        RunLog.finish(report)
+        _state.value = UiState.Finished(report)
     }
 
     /**

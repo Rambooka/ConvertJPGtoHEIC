@@ -95,7 +95,7 @@ class MusicConverter(private val context: Context) {
             return Outcome.Converted(out.length())
         } catch (e: Problem) {
             // Logged as well as reported: the report is gone once the app is closed.
-            Log.i(TAG, "Not converting ${track.displayName}: ${e.message}")
+            note("Not converting ${track.displayName}: ${e.message}")
             out.delete()
             return Outcome.Failed(e.message ?: "unknown")
         } catch (e: Exception) {
@@ -204,7 +204,7 @@ class MusicConverter(private val context: Context) {
             if (opaque !== bitmap) opaque.recycle()
             val data = out.toByteArray()
             if (data.size >= picture.data.size) return picture
-            Log.i(TAG, "Cover art shrunk from ${picture.data.size} to ${data.size} bytes (${bitmap.width}x${bitmap.height})")
+            note("Cover art shrunk from ${picture.data.size} to ${data.size} bytes (${bitmap.width}x${bitmap.height})")
             return picture.copy(mime = "image/jpeg", data = data)
         } finally {
             bitmap.recycle()
@@ -416,8 +416,7 @@ class MusicConverter(private val context: Context) {
             muxer!!.stop()
             muxerStarted = false
             val decodedUs = decodedFrames * 1_000_000 / inRate
-            Log.i(
-                TAG,
+            note(
                 "${track.displayName}: ${dec.name} · $extractorSamples frames in, last at ${lastSampleUs / 1000} ms · " +
                     "$decodedFrames samples out from ${firstOutputUs / 1000} ms = ${decodedUs / 1000} ms · " +
                     "file says ${expectedUs / 1000} ms",
@@ -546,6 +545,12 @@ class MusicConverter(private val context: Context) {
                 .onFailure { Log.w(TAG, "$AOSP_FLAC_DECODER unavailable; using the default", it) }
         }
         return MediaCodec.createDecoderByType(mime)
+    }
+
+    /** To logcat and the run's own log. */
+    private fun note(message: String) {
+        Log.i(TAG, message)
+        RunLog.line(message)
     }
 
     /** Float samples to 16-bit PCM in the platform's byte order, which is what MediaCodec expects. */
