@@ -596,10 +596,12 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
      */
     fun verifyWritten(uri: android.net.Uri, width: Int, height: Int): String? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        repository.openOriginal(uri, requireOriginal = false)?.use { BitmapFactory.decodeStream(it, null, bounds) }
-            ?: return "the new file could not be opened"
+        // A bounds-only decode returns no bitmap by design; the header is in [bounds].
+        val header = repository.openOriginal(uri, requireOriginal = false) ?: return "the new file could not be opened"
+        header.use { BitmapFactory.decodeStream(it, null, bounds) }
         val w = bounds.outWidth
         val h = bounds.outHeight
+        if (w <= 0 || h <= 0) return "the new file has no readable image header"
         if (!((w == width && h == height) || (w == height && h == width))) {
             return "the new file reads as ${w}x$h, not ${width}x$height"
         }

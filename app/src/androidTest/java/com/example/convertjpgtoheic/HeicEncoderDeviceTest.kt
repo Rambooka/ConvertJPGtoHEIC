@@ -78,6 +78,24 @@ class HeicEncoderDeviceTest {
         }
 
     @Test
+    fun readBackAcceptsAGoodHeicAndRefusesATruncatedOne() {
+        val photo = picture("check.jpg", scene(1200, 800), Bitmap.CompressFormat.JPEG)
+        val metadata = JpegMetadata(MinimalExif.forDate(photo.dateTakenMs), false, false, false)
+        val result = encoder.encodeToStaging(photo, metadata, 80, 90, allowShrink = true)
+        assertTrue("encode failed: $result", result is EncodeResult.Success)
+        val success = result as EncodeResult.Success
+        val heic = success.file!!
+
+        // The real thing, rotated: the decoder may report either way round.
+        assertEquals(null, encoder.verifyWritten(Uri.fromFile(heic), success.width, success.height))
+        // The wrong size must be caught.
+        assertTrue(encoder.verifyWritten(Uri.fromFile(heic), 640, 480) != null)
+        // Cut off part way through the tiles: the header still reads, the picture must not.
+        val cut = File(dir, "cut.heic").also { it.writeBytes(heic.readBytes().copyOf((heic.length() * 0.6).toInt())) }
+        assertTrue(encoder.verifyWritten(Uri.fromFile(cut), success.width, success.height) != null)
+    }
+
+    @Test
     fun jpegBecomesAHeicOfTheSameSize() {
         val decoded = encode(picture("plain.jpg", scene(1200, 800), Bitmap.CompressFormat.JPEG))
         assertEquals(1200, decoded.width)
