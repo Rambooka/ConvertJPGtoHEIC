@@ -72,8 +72,12 @@ class MusicConverter(private val context: Context) {
         out.delete()
         scratch.delete()
         try {
-            val read = shrinkPictures(readTags(track.uri))
-            val tags = read.copy(pictures = OggOpus.withFrontCover(read.pictures))
+            // Only the cover: players show one picture, and some rips carry the whole booklet in
+            // every track (11 scans, 3.8 MB), which base64 grows by a third — enough that the copy
+            // came out no smaller than the MP3. Front covers sort first, so this is the one shown.
+            val read = readTags(track.uri).let { it.copy(pictures = it.pictures.take(1)) }
+            val shrunk = shrinkPictures(read)
+            val tags = shrunk.copy(pictures = OggOpus.withFrontCover(shrunk.pictures))
             val comments = tags.comments + tags.pictures.map(OggOpus::pictureComment)
             // Checked before the encode, which would otherwise be wasted. The vendor string is
             // the encoder's and not known yet; it is a few dozen bytes.
