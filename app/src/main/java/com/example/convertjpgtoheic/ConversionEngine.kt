@@ -1337,18 +1337,30 @@ class ConversionEngine private constructor(context: Context) {
         var deletedTotal = 0
         var declined = false
 
+        // Pace by bytes: a long song takes proportionally longer.
         val totalMb = (tracks.sumOf { it.sizeBytes } / MB).toInt().coerceAtLeast(1)
         val eta = Eta(totalMb)
         var doneBytes = 0L
+        var completed = 0
 
-        fun progress(index: Int, track: SourceTrack, fraction: Float) {
-            val doneMb = ((doneBytes + (track.sizeBytes * fraction).toLong()) / MB).toInt()
+        // Songs are encoded [musicWorkers] at a time: the work is CPU-bound and single-threaded
+        // per song, and the phone has cores to spare. Everything the workers share — the tally,
+        // the waiting list, what is in flight — is touched only under [stateLock].
+        val stateLock = Any()
+        val inFlight = java.util.TreeMap<Int, Pair<SourceTrack, Float>>()
+
+        /** The progress for what is going now; call under [stateLock]. */
+        fun render() {
+            val names = inFlight.values.joinToString(" · ") { it.first.displayName }
+            val fraction = if (inFlight.isEmpty()) 0f else inFlight.values.map { it.second }.average().toFloat()
+            val doneMb = ((doneBytes + inFlight.values.sumOf { (t, f) -> (t.sizeBytes * f).toLong() }) / MB).toInt()
+            val held = (_state.value as? UiState.Working)?.progress?.pausedReason
             _state.value = UiState.Working(
                 mode,
                 RunProgress(
-                    done = index,
+                    done = completed,
                     total = tracks.size,
-                    currentName = track.displayName,
+                    currentName = names,
                     converted = tally.converted,
                     savedBytes = tally.savedBytes,
                     failures = tally.failureCount,
@@ -1357,6 +1369,7 @@ class ConversionEngine private constructor(context: Context) {
                     pendingDeletions = waiting.size,
                     remainingMs = eta.remainingMs(doneMb),
                     itemFraction = fraction,
+                    pausedReason = held,
                 ),
             )
         }
@@ -1370,19 +1383,56 @@ class ConversionEngine private constructor(context: Context) {
             if (!answer.granted) declined = true
         }
 
-        for ((index, track) in tracks.withIndex()) {
-            if (cancelRequested) break
-            holdIfNeeded(options)
-            progress(index, track, 0f)
-            try {
-                tally = convertOneTrack(options, track, tally, waiting) { progress(index, track, it) }
-            } finally {
-                doneBytes += track.sizeBytes
+        // In batches, so the delete prompt comes between batches with every worker idle.
+        var next = 0
+        while (next < tracks.size && !cancelRequested && !declined) {
+            val end = minOf(next + MUSIC_DELETE_EVERY, tracks.size)
+            val cursor = java.util.concurrent.atomic.AtomicInteger(next)
+            var lowSpace = false
+            kotlinx.coroutines.coroutineScope {
+                repeat(musicWorkers()) {
+                    launch(Dispatchers.Default) {
+                        while (!cancelRequested) {
+                            holdIfNeeded(options)
+                            if (cancelRequested || (lowSpace && deleteAsWeGo)) break
+                            // Every index taken is finished: nothing below `cursor` is ever skipped.
+                            val i = cursor.getAndIncrement()
+                            if (i >= end) break
+                            val track = tracks[i]
+                            synchronized(stateLock) {
+                                inFlight[i] = track to 0f
+                                render()
+                            }
+                            val outcome = try {
+                                prepareTrack(track) { f ->
+                                    synchronized(stateLock) {
+                                        inFlight[i] = track to f
+                                        render()
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Could not convert ${track.displayName}", e)
+                                TrackOutcome.Failed("${e.javaClass.simpleName}: ${e.message ?: "no detail"}")
+                            }
+                            synchronized(stateLock) {
+                                tally = commitTrack(options, track, outcome, tally, waiting)
+                                doneBytes += track.sizeBytes
+                                completed++
+                                inFlight.remove(i)
+                                if (deleteAsWeGo && waiting.isNotEmpty() &&
+                                    encoder.freeStagingBytes() in 0 until LOW_SPACE_THRESHOLD_BYTES
+                                ) lowSpace = true
+                                render()
+                            }
+                        }
+                    }
+                }
             }
-            if (deleteAsWeGo && !declined &&
-                (waiting.size >= MUSIC_DELETE_EVERY || (waiting.isNotEmpty() && encoder.freeStagingBytes() in 0 until LOW_SPACE_THRESHOLD_BYTES))
+            next = cursor.get().coerceAtMost(end)
+            if (deleteAsWeGo && !declined && waiting.isNotEmpty() &&
+                (waiting.size >= MUSIC_DELETE_EVERY || lowSpace || next >= tracks.size)
             ) {
-                flushDeletions(index + 1)
+                flushDeletions(next)
             }
         }
         if (deleteAsWeGo && !declined) flushDeletions(tracks.size)
@@ -1402,44 +1452,77 @@ class ConversionEngine private constructor(context: Context) {
         )
     }
 
-    private fun convertOneTrack(
-        options: RunOptions,
-        track: SourceTrack,
-        tally: RunReport,
-        waiting: MutableList<Uri>,
-        onProgress: (Float) -> Unit,
-    ): RunReport {
-        // Converted by an earlier run, whose original the user chose to keep.
-        if (repository.opusExistsBeside(track)) return tally.copy(skippedExisting = tally.skippedExisting + 1)
+    /** How many songs to encode at once: up to [MUSIC_WORKERS], never more than half the cores. */
+    private fun musicWorkers(): Int =
+        minOf(MUSIC_WORKERS, Runtime.getRuntime().availableProcessors() / 2).coerceAtLeast(1)
+
+    /** What became of one song's encode, before anything shared is touched. */
+    private sealed interface TrackOutcome {
+        /** An `.opus` is already beside it, from an earlier run whose original the user kept. */
+        data object AlreadyConverted : TrackOutcome
+        data class Failed(val reason: String) : TrackOutcome
+        /** Came out no smaller than the original; a bigger copy would defeat the purpose. */
+        data object NotSmaller : TrackOutcome
+        /** Encoded, checked, and waiting in [staged] to be published. */
+        data class Encoded(val staged: File, val bytes: Long) : TrackOutcome
+    }
+
+    /** The part of a song's conversion that needs nothing shared: safe to run several at once. */
+    private fun prepareTrack(track: SourceTrack, onProgress: (Float) -> Unit): TrackOutcome {
+        if (repository.opusExistsBeside(track)) return TrackOutcome.AlreadyConverted
         val free = encoder.freeStagingBytes()
         if (free in 0 until track.sizeBytes * 3 + MIN_FREE_SPACE_BYTES) {
-            return tally.withFailure(track.uri, track.displayName, track.sizeBytes,
-                "not enough free space to convert it (${free / MB} MB free)")
+            return TrackOutcome.Failed("not enough free space to convert it (${free / MB} MB free)")
         }
-
         val stamp = System.nanoTime()
         val scratch = File(musicStaging, "$stamp-raw.opus")
         val staged = File(musicStaging, "$stamp.opus")
-        try {
-            val bytes = when (val outcome = musicConverter.convert(track, staged, scratch, onProgress)) {
-                is MusicConverter.Outcome.Failed ->
-                    return tally.withFailure(track.uri, track.displayName, track.sizeBytes, outcome.reason)
-                is MusicConverter.Outcome.Converted -> outcome.bytes
-            }
-            // Always, whatever the photo option says: a bigger copy would defeat the purpose.
-            if (bytes >= track.sizeBytes) return tally.copy(musicNotSmaller = tally.musicNotSmaller + 1)
-            if (options.dryRun) return countMeasured(tally, track.sizeBytes, bytes)
-            repository.publishOpus(track, staged)
-                ?: return tally.withFailure(track.uri, track.displayName, track.sizeBytes, "could not be saved to the music library")
-            if (options.deleteOriginals) waiting += track.uri
-            return tally.copy(
-                converted = tally.converted + 1,
-                originalBytes = tally.originalBytes + track.sizeBytes,
-                heicBytes = tally.heicBytes + bytes,
-            )
+        val outcome = try {
+            musicConverter.convert(track, staged, scratch, onProgress)
         } finally {
             scratch.delete()
-            staged.delete()
+        }
+        return when (outcome) {
+            is MusicConverter.Outcome.Failed -> {
+                staged.delete()
+                TrackOutcome.Failed(outcome.reason)
+            }
+            is MusicConverter.Outcome.Converted ->
+                if (outcome.bytes >= track.sizeBytes) {
+                    staged.delete()
+                    TrackOutcome.NotSmaller
+                } else {
+                    TrackOutcome.Encoded(staged, outcome.bytes)
+                }
+        }
+    }
+
+    /** Publishes a prepared song and counts it; the one part done under the lock. */
+    private fun commitTrack(
+        options: RunOptions,
+        track: SourceTrack,
+        outcome: TrackOutcome,
+        tally: RunReport,
+        waiting: MutableList<Uri>,
+    ): RunReport = when (outcome) {
+        TrackOutcome.AlreadyConverted -> tally.copy(skippedExisting = tally.skippedExisting + 1)
+        is TrackOutcome.Failed -> tally.withFailure(track.uri, track.displayName, track.sizeBytes, outcome.reason)
+        TrackOutcome.NotSmaller -> tally.copy(musicNotSmaller = tally.musicNotSmaller + 1)
+        is TrackOutcome.Encoded -> try {
+            if (options.dryRun) {
+                countMeasured(tally, track.sizeBytes, outcome.bytes)
+            } else if (repository.publishOpus(track, outcome.staged) == null) {
+                tally.withFailure(track.uri, track.displayName, track.sizeBytes, "could not be saved to the music library")
+            } else {
+                if (options.deleteOriginals) waiting += track.uri
+                tally.copy(
+                    converted = tally.converted + 1,
+                    originalBytes = tally.originalBytes + track.sizeBytes,
+                    heicBytes = tally.heicBytes + outcome.bytes,
+                )
+            }
+        } finally {
+            outcome.staged.delete()
         }
     }
 
@@ -1979,6 +2062,9 @@ class ConversionEngine private constructor(context: Context) {
 
         /** Songs to convert before stopping to have their MP3s removed. */
         private const val MUSIC_DELETE_EVERY = 100
+
+        /** Songs encoded at once, cores allowing: the pipeline is single-threaded per song. */
+        private const val MUSIC_WORKERS = 3
 
         private const val MB = 1024L * 1024
 
