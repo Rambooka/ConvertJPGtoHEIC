@@ -203,27 +203,6 @@
             android:layout_marginTop="24dp"
             android:text="@string/action_convert" />
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/cancelButton"
-            style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:text="@string/action_cancel"
-            android:visibility="gone"
-            tools:visibility="visible" />
-
-        <!-- For a delete or allow-changes prompt that went away unanswered (the screen locked). -->
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/reshowPromptButton"
-            style="@style/Widget.Material3.Button.TonalButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="@string/action_reshow_prompt"
-            android:visibility="gone"
-            tools:visibility="visible" />
-
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -313,6 +292,28 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
             android:text="@string/action_cleanup" />
+
+        <!-- Run controls: shown only while a run is going, so beside its progress. -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/cancelButton"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="@string/action_cancel"
+            android:visibility="gone"
+            tools:visibility="visible" />
+
+        <!-- For a delete or allow-changes prompt that went away unanswered (the screen locked). -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/reshowPromptButton"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="@string/action_reshow_prompt"
+            android:visibility="gone"
+            tools:visibility="visible" />
 
         <!-- Progress -->
         <com.google.android.material.progressindicator.LinearProgressIndicator
