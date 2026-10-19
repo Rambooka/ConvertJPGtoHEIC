@@ -673,11 +673,14 @@ class PhotoRepository(private val context: Context) {
             MediaStore.Audio.Media.BITRATE,
         )
         val mimes = SOURCE_AUDIO_MIMES.joinToString(", ") { "?" }
+        // Not .m4p: iTunes Store copy protection (FairPlay). The audio is encrypted, so nothing on
+        // the phone can decode it — or play it — and it would only ever be reported as failing.
         val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0 AND " +
-            "(${MediaStore.Audio.Media.MIME_TYPE} IN ($mimes) OR ${MediaStore.Audio.Media.DISPLAY_NAME} LIKE ?)"
+            "(${MediaStore.Audio.Media.MIME_TYPE} IN ($mimes) OR ${MediaStore.Audio.Media.DISPLAY_NAME} LIKE ?) AND " +
+            "${MediaStore.Audio.Media.DISPLAY_NAME} NOT LIKE ?"
         val out = ArrayList<SourceTrack>()
         resolver.query(
-            audioCollection, projection, selection, (SOURCE_AUDIO_MIMES + "%.m4a").toTypedArray(),
+            audioCollection, projection, selection, (SOURCE_AUDIO_MIMES + "%.m4a" + "%.m4p").toTypedArray(),
             "${MediaStore.Audio.Media.RELATIVE_PATH} ASC, ${MediaStore.Audio.Media.DISPLAY_NAME} ASC",
         )?.use { c ->
             while (c.moveToNext()) {
