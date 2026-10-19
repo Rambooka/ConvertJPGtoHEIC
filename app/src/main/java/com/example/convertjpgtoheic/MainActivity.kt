@@ -855,19 +855,19 @@ class MainActivity : AppCompatActivity() {
             appendLine("No songs were converted.")
         } else {
             appendLine("Songs converted:   ${report.converted}")
-            appendLine("MP3 size:          ${formatSize(report.originalBytes)}")
+            appendLine("Original size:     ${formatSize(report.originalBytes)}")
             appendLine("Opus size:         ${formatSize(report.heicBytes)}")
             appendLine("Space saved:       ${formatSize(report.savedBytes)} (${report.savedPercent}%)")
         }
         if (report.musicRenamed > 0) appendLine("Renamed .ogg → .opus: ${report.musicRenamed}")
-        if (report.musicNotSmaller > 0) appendLine("Not smaller:       ${report.musicNotSmaller} (kept the MP3)")
+        if (report.musicNotSmaller > 0) appendLine("Not smaller:       ${report.musicNotSmaller} (kept the original)")
         if (report.skippedExisting > 0) appendLine("Already converted: ${report.skippedExisting}")
         when (report.deletionOutcome) {
-            DeletionOutcome.COMPLETED -> appendLine("MP3s deleted:      ${report.deletedOriginals}")
+            DeletionOutcome.COMPLETED -> appendLine("Originals deleted: ${report.deletedOriginals}")
             DeletionOutcome.DECLINED -> appendLine(
-                "MP3s kept:         deletion was declined (${report.deletedOriginals} deleted before that)"
+                "Originals kept:    deletion was declined (${report.deletedOriginals} deleted before that)"
             )
-            else -> if (report.converted > 0) appendLine("The MP3s were kept.")
+            else -> if (report.converted > 0) appendLine("The originals were kept.")
         }
     }
 
@@ -922,7 +922,7 @@ class MainActivity : AppCompatActivity() {
                 if (report.cancelled) {
                     appendLine("Stopped before the search finished.")
                 } else {
-                    appendLine("No leftover originals found (JPGs in this range, or MP3s).")
+                    appendLine("No leftover originals found (JPGs in this range, or songs).")
                 }
 
             DeletionOutcome.PENDING ->
@@ -930,7 +930,7 @@ class MainActivity : AppCompatActivity() {
 
             DeletionOutcome.COMPLETED -> {
                 appendLine("Deleted ${report.deletedOriginals} leftover originals.")
-                appendLine("Found:     ${report.leftoverJpgs} JPGs, ${report.leftoverMp3s} MP3s")
+                appendLine("Found:     ${report.leftoverJpgs} JPGs, ${report.leftoverMp3s} songs")
                 appendLine("Reclaimed: ${formatSize(report.originalBytes)}")
             }
 

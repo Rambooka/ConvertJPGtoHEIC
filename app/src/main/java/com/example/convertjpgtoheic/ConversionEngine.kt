@@ -1230,7 +1230,7 @@ class ConversionEngine private constructor(context: Context) {
         }
         // Copies made before the switch from `.ogg` first, so they count as already converted.
         val renamed = repository.renameOwnOggsToOpus()
-        val tracks = repository.queryMusicMp3s()
+        val tracks = repository.queryMusicToConvert()
         if (tracks.isEmpty()) {
             _state.value = UiState.Finished(RunReport(mode, musicRenamed = renamed))
             return

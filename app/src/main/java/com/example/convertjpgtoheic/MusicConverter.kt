@@ -32,12 +32,14 @@ data class SourceTrack(
     /** Bits per second, as MediaStore reports it; null when it does not know. */
     val bitrate: Long?,
 ) {
-    /** The converted file's name. It differs from the MP3's by extension, so both can sit side by side. */
+    /** The converted file's name. It differs from the original's by extension, so both can sit side by side. */
     val opusName: String get() = PhotoNaming.baseName(displayName) + ".opus"
 }
 
 /**
- * Re-encodes an MP3 as Opus in an Ogg file, named `.opus`.
+ * Re-encodes an MP3, or an AAC song in an MP4 (`.m4a`), as Opus in an Ogg file, named `.opus`.
+ * The tags come from ID3 for an MP3 and from iTunes' `ilst` for an M4A ([M4aTags]); either way
+ * they arrive as Vorbis comments, and nothing after reading them differs.
  *
  * `.opus` rather than `.ogg`, although both are the same Ogg container: tag editors built on
  * jaudiotagger (Pulsar+, for one) take an `.ogg` to be Vorbis and refuse to open an Opus one
@@ -107,6 +109,7 @@ class MusicConverter(private val context: Context) {
         val input = resolver.openInputStream(uri) ?: throw Problem("it could not be opened")
         val v2 = input.use {
             val header = it.readNBytesCompat(10)
+            if (M4aTags.isMp4(header)) return readMp4Tags(uri)
             val length = Id3Tags.v2Length(header)
             when {
                 length == 0 -> null // no ID3v2 tag: perfectly ordinary
@@ -128,6 +131,11 @@ class MusicConverter(private val context: Context) {
         }
         return Id3Tags.parse(v2, v1)
     }
+
+    private fun readMp4Tags(uri: Uri): Id3Tags.Tags =
+        context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+            M4aTags.read(FdSource(pfd.fileDescriptor, pfd.statSize))
+        } ?: throw Problem("its tags could not be read")
 
     private fun java.io.InputStream.readNBytesCompat(n: Int): ByteArray {
         val out = ByteArray(n)
@@ -220,7 +228,7 @@ class MusicConverter(private val context: Context) {
             extractor.selectTrack(index)
             val inFormat = extractor.getTrackFormat(index)
             val mime = inFormat.getString(MediaFormat.KEY_MIME)!!
-            if (mime != MediaFormat.MIMETYPE_AUDIO_MPEG) throw Problem("it is $mime, not MP3")
+            if (mime !in SOURCE_MIMES) throw Problem("it is $mime, not MP3 or AAC")
             val expectedUs = if (inFormat.containsKey(MediaFormat.KEY_DURATION)) {
                 inFormat.getLong(MediaFormat.KEY_DURATION)
             } else {
@@ -501,6 +509,9 @@ class MusicConverter(private val context: Context) {
 
     companion object {
         private const val TAG = "MusicConverter"
+
+        /** What the platform's decoders are asked to take: MP3, and AAC (`audio/mp4a-latm`) from an M4A. */
+        private val SOURCE_MIMES = setOf(MediaFormat.MIMETYPE_AUDIO_MPEG, MediaFormat.MIMETYPE_AUDIO_AAC)
 
         private const val OPUS_RATE = 48_000
         private const val OPUS_COMPLEXITY = 10

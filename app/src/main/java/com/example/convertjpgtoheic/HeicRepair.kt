@@ -176,19 +176,6 @@ class HeicRepair(private val resolver: ContentResolver) {
         return SefTrailer.parse(src.read(src.size - take, take), src.size)?.sefStart
     }
 
-    private class FdSource(private val fd: FileDescriptor, override val size: Long) : ByteSource {
-        override fun read(position: Long, length: Int): ByteArray {
-            val out = ByteArray(length)
-            var done = 0
-            while (done < length) {
-                val n = Os.pread(fd, out, done, length - done, position + done)
-                if (n <= 0) throw IllegalStateException("short read at ${position + done}")
-                done += n
-            }
-            return out
-        }
-    }
-
     companion object {
         private const val TAG = "HeicRepair"
 

@@ -112,7 +112,7 @@ class ConversionService : Service() {
                             } else if (state.mode == RunMode.VIDEO) {
                                 "Confirm deleting ${state.pending} original videos"
                             } else if (state.mode == RunMode.MUSIC) {
-                                "Confirm deleting ${state.pending} original MP3s"
+                                "Confirm deleting ${state.pending} original songs"
                             } else if (state.lowOnSpace) {
                                 "Storage low — confirm deleting ${state.pending} originals"
                             } else {

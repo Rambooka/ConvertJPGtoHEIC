@@ -646,10 +646,13 @@ class PhotoRepository(private val context: Context) {
     private val audioCollection: Uri = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
 
     /**
-     * Every MP3 the music library knows of, folder by folder. Not limited to the date range: songs
-     * have no capture date, and the range is about when photos were taken.
+     * Every MP3 and AAC song (`.m4a`) the music library knows of, folder by folder. Not limited to
+     * the date range: songs have no capture date, and the range is about when photos were taken.
+     *
+     * Matched by MIME type, and by name as well: MediaStore has been seen filing whole albums of
+     * `.m4a` as `audio/mpeg`. What the file really holds is checked when it is decoded.
      */
-    fun queryMusicMp3s(): List<SourceTrack> {
+    fun queryMusicToConvert(): List<SourceTrack> {
         val projection = arrayOf(
             MediaStore.Audio.Media._ID,
             MediaStore.Audio.Media.DISPLAY_NAME,
@@ -659,10 +662,12 @@ class PhotoRepository(private val context: Context) {
             MediaStore.Audio.Media.DURATION,
             MediaStore.Audio.Media.BITRATE,
         )
-        val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0 AND ${MediaStore.Audio.Media.MIME_TYPE} = ?"
+        val mimes = SOURCE_AUDIO_MIMES.joinToString(", ") { "?" }
+        val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0 AND " +
+            "(${MediaStore.Audio.Media.MIME_TYPE} IN ($mimes) OR ${MediaStore.Audio.Media.DISPLAY_NAME} LIKE ?)"
         val out = ArrayList<SourceTrack>()
         resolver.query(
-            audioCollection, projection, selection, arrayOf("audio/mpeg"),
+            audioCollection, projection, selection, (SOURCE_AUDIO_MIMES + "%.m4a").toTypedArray(),
             "${MediaStore.Audio.Media.RELATIVE_PATH} ASC, ${MediaStore.Audio.Media.DISPLAY_NAME} ASC",
         )?.use { c ->
             while (c.moveToNext()) {
@@ -699,7 +704,7 @@ class PhotoRepository(private val context: Context) {
      * copy must also be non-empty and run as long, which a truncated or unrelated file would not.
      */
     fun findStrandedMp3s(): List<SourceTrack> {
-        val mp3s = queryMusicMp3s()
+        val mp3s = queryMusicToConvert()
         if (mp3s.isEmpty()) return emptyList()
 
         val opusDurations = mutableMapOf<String, Long>()
@@ -983,6 +988,11 @@ class PhotoRepository(private val context: Context) {
          * encoder's padding; a real copy lands within a few tens of milliseconds.
          */
         private const val DURATION_MATCH_TOLERANCE_MS = 2000L
+
+        /** MP3, and the names MediaStore gives AAC in an MP4 or bare. */
+        private val SOURCE_AUDIO_MIMES = listOf(
+            "audio/mpeg", "audio/mp4", "audio/x-m4a", "audio/m4a", "audio/aac", "audio/aacp", "audio/mp4a-latm",
+        )
         private const val TAG = "PhotoRepository"
     }
 }

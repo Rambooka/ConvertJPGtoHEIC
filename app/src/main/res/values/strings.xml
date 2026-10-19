@@ -30,7 +30,7 @@
     <string name="action_convert">Convert</string>
     <string name="action_cleanup">Clean up leftovers</string>
     <string name="action_cleanup_hint">Finds JPGs in this range that already have a HEIC beside
-        them, and MP3s that already have their Opus copy — left behind by a run that was cancelled
+        them, and songs that already have their Opus copy — left behind by a run that was cancelled
         or whose delete prompt was declined.</string>
     <string name="action_cancel">Cancel</string>
     <string name="action_view">View</string>
@@ -111,28 +111,28 @@ This frees
         <item quantity="other">Waiting for you to confirm deleting %1$d original videos.</item>
     </plurals>
     <string name="action_music">Convert music to Opus</string>
-    <string name="action_music_hint">Re-encodes every MP3 in your music library as Opus (.opus),
+    <string name="action_music_hint">Re-encodes every MP3 and M4A in your music library as Opus (.opus),
         keeping title, artist, album and cover. A song is only kept as .opus if it comes out
         smaller. Covers the whole library, not just this range. Uses the delete option above.</string>
     <string name="music_title">Convert music to Opus?</string>
-    <string name="music_message_delete">Each MP3 in your music library is re-encoded as Opus and
+    <string name="music_message_delete">Each MP3 and M4A in your music library is re-encoded as Opus and
         saved beside it as name.opus, with its tags and cover copied across. A copy is only kept if
-        it is smaller than the MP3, and only after it has been checked against it.\n\nYou will be
-        asked to confirm deleting the MP3s every 100 songs. Playlists that list the MP3s will lose
+        it is smaller than the original, and only after it has been checked against it.\n\nYou will be
+        asked to confirm deleting the originals every 100 songs. Playlists that list the originals will lose
         those songs; the new copies can be added back.\n\nRe-encoding a compressed file loses a
-        little quality. It is rarely audible at the bitrates used, but the MP3s cannot be got back
+        little quality. It is rarely audible at the bitrates used, but the originals cannot be got back
         once deleted.</string>
-    <string name="music_message_keep">Each MP3 in your music library is re-encoded as Opus and
+    <string name="music_message_keep">Each MP3 and M4A in your music library is re-encoded as Opus and
         saved beside it as name.opus, with its tags and cover copied across. A copy is only kept if
-        it is smaller than the MP3, and only after it has been checked against it.\n\n\"Delete
-        originals\" is off, so the MP3s will be kept and both copies will show in your music
+        it is smaller than the original, and only after it has been checked against it.\n\n\"Delete
+        originals\" is off, so the originals will be kept and both copies will show in your music
         app.</string>
     <string name="music_button">Convert</string>
     <string name="music_need_permission">Allow access to music and audio to convert it.</string>
     <string name="progress_music">Converting song %1$d of %2$d · %3$d%%\n%4$s\nConverted %5$d · saved %6$s so far</string>
     <plurals name="awaiting_music_deletion">
-        <item quantity="one">Waiting for you to confirm deleting %1$d MP3.</item>
-        <item quantity="other">Waiting for you to confirm deleting %1$d MP3s.</item>
+        <item quantity="one">Waiting for you to confirm deleting %1$d original.</item>
+        <item quantity="other">Waiting for you to confirm deleting %1$d originals.</item>
     </plurals>
     <string name="action_repair">Repair converted photos</string>
     <string name="action_repair_hint">Fixes HEICs that show sideways in some viewers (Phone Link,
@@ -160,6 +160,6 @@ This frees
     <string name="confirm_keep_button">Convert, keep originals</string>
     <string name="cleanup_title">Delete leftover originals?</string>
     <string name="cleanup_message">Every JPG this finds already has a HEIC beside it in the same
-        folder, and every MP3 an Opus copy of the same length. You will be asked to confirm before
+        folder, and every song an Opus copy of the same length. You will be asked to confirm before
         anything is deleted.</string>
 </resources>
