@@ -1,54 +1,77 @@
 # ConvertJPGtoHEIC — working notes
 
 Android app that shrinks a phone's media library in place and offers to delete the originals:
-JPG → HEIC (`androidx.heifwriter`), H.264 → HEVC video, and MP3 / M4A (AAC) / FLAC → Opus music.
-Everything is published through MediaStore. Also repairs earlier output (photo dates and rotation,
-music years) and cleans up leftovers.
+JPG/PNG → HEIC (`androidx.heifwriter`), H.264 → HEVC video, and MP3 / M4A (AAC) / FLAC → Opus
+music. Everything is published through MediaStore. Also repairs earlier output (photo dates and
+rotation, music years), cleans up leftovers (pictures, videos, songs) and deletes copy-protected
+`.m4p` songs. A **Dry run** switch (not saved; off at every launch) makes the three converters
+measure and discard instead.
 
-## Build
+## Build and test
 
 ```bash
 JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:assembleDebug
 JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:testDebugUnitTest
+JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:assembleDebugAndroidTest
 ```
 
-APK lands at `app/build/outputs/apk/debug/app-debug.apk`.
+APKs land in `app/build/outputs/apk/debug/` and `…/apk/androidTest/debug/`.
 
-Real-file tests are skipped unless a folder of samples is named: `REPAIR_SAMPLES_DIR` (.heic),
-`M4A_SAMPLES_DIR`, `FLAC_SAMPLES_DIR`, `OPUS_SAMPLES_DIR`. Pull samples from the phone into the
-scratchpad, never into the repo.
+**Device tests** (`app/src/androidTest`): HEIC size, rotation and transparent PNG; M4A and FLAC →
+Opus within 60 ms of the source. They use generated media in the app's cache, never the library.
+**Do not use `connectedDebugAndroidTest`** — it uninstalls the app afterwards, which drops its
+settings and its ownership of the files it made. Install both APKs with `install -r`, then:
+
+```powershell
+adb shell am instrument -w com.example.convertjpgtoheic.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+`am instrument` restarts the app process: only when no run is going (see below).
+
+Real-file unit tests are skipped unless a folder of samples is named: `REPAIR_SAMPLES_DIR`
+(.heic), `M4A_SAMPLES_DIR`, `FLAC_SAMPLES_DIR`, `OPUS_SAMPLES_DIR`. Pull samples from the phone
+into the scratchpad, never into the repo.
 
 ---
 
-## PICK UP HERE (2026-10-19, evening)
+## PICK UP HERE (2026-10-20)
 
-Branch **`fix/music-oversized-cover-art`**: 12 commits, pushed, **not merged to `main`** (the user
-has not chosen PR or direct merge). The earlier photo/video branch is merged. The current build is
-installed on the phone.
+Branch **`fix/music-oversized-cover-art`**: 22 commits, pushed, **not merged to `main`** (the user
+has not chosen PR or direct merge). The earlier photo/video branch is merged.
 
-### Running when the user left
+### Waiting on the phone
 
-1. **FLAC → Opus** (12 Katy Perry "Smile" FLACs, 263 MB). Re-run with the new `FlacFrames` reader
-   after the first copies were found truncated (see "Samsung's FLAC extractor"). The first two
-   came out within 19–23 ms of the FLAC; the user was told to accept the delete prompt. **Check**:
-   every `.opus` in `Music/Katy Perry/…FLAC [Hunter]/` against the FLAC's duration, or the log's
-   per-song line (`… samples out … = X ms · file says Y ms`).
-2. **Photos 2020 → 2026** next ("Convert pictures to HEIC"): 6,030 camera JPGs from 2023–24, 16 GB,
-   never converted only because the range had been 1 Sep–26 Oct 2026. None sampled were motion
-   photos. Afterwards "Clean up leftovers" for the 423 JPGs (1.4 GB) that already have a HEIC.
+A run was going when the session ended, so the last commits are **built but not installed**
+(the phone has `ca2ae9b`). Once it is idle:
 
-### Library state (survey of 19 Oct; 225 GB phone, 184 GB used)
+1. Install `app-debug.apk`, then the test APK, and run the device tests (command above). Nothing
+   of `e3b6a92`…`171787b` has run on the phone yet: video per-track length check, encode
+   watchdog, prompt re-raise, run log, device tests.
+2. **Check the MP3/M4A readers deliver whole songs** — the last open part of "music verified only
+   against what was decoded" (see g). Push the samples kept in the scratchpad (`mp3/playmate.mp3`,
+   `blessed.mp3`, `delta.mp3`, `m4a/salute.m4a`, `girls.m4a`) into a temporary music folder, have
+   the user turn on Dry run and tap Convert music, read each song's line in the run log
+   (`… samples out … = X ms · file says Y ms`), then delete the folder.
+3. Confirm a run log appears under `Android/data/com.example.convertjpgtoheic/files/logs/`.
+
+### Library state (20 Oct; 225 GB phone, 49 GB free, from 40 GB on the 19th)
 
 | What | Size | Status |
 |---|---|---|
-| HEIC | 28,468 · 59.7 GB | done |
-| JPG ≥ 1 MB | 6,355 · 16.9 GB | being converted (above) |
-| JPG < 1 MB | 4,047 · 1.0 GB | skipped by `skipSmall`; little to gain |
+| HEIC | 33,412 · 69.7 GB | done; recent phone JPGs only shrink ~18% at quality 80 |
+| JPG ≥ 1 MB | 1,250 · 4.1 GB | left: pre-2020, kept as "not smaller" (panoramas), or not reached |
+| JPG < 1 MB | ~4,000 · 1 GB | skipped by `skipSmall`; little to gain |
+| PNG | 88 · 0.92 GB | convertible since `65d88b4`. 20 Aqua booklet scans (0.65 GB, `Music/Aqua/…/Covers`) are dated 2016: outside the 2020–2026 range |
 | Video already HEVC | 355 · 11.6 GB | done |
 | **Video H.264** | **154 · 3.25 GB** | **not yet run** — ~1.3 GB at the ~40% measured |
-| Opus music | 1,333 · 5.8 GB | done; 1,221 given a YEAR by the repair, 108 have no date at all |
+| Opus music | 1,345 · 5.8 GB | done, FLACs included (7–24 ms of the source); 108 have no date |
 | `.m4p` (FairPlay) | 2 · 7 MB | cannot be decoded; "Delete copy-protected songs" offers them |
-| GIF / PNG | 103 · 0.94 GB / 88 · 0.92 GB | not handled; would mean a format change |
+| GIF | 103 · 0.94 GB | not handled |
+
+Outside media (Android's `dumpsys diskstats`): apps 43.6 GB, app data 39.9 GB, system 33.5 GB.
+The user was pointed at the big wins there: games (~7.5 GB), Facebook (6.2 GB), app caches
+(~4 GB), Smart Switch (1.1 GB). Also installed: **Lucky Patcher** under the random package name
+`ru.uoeuegqa.khfddpazb` (sideloaded), 579 MB in its folder — the user knows.
 
 Old video notes still apply: SEF-trailer videos (slow-mo, hyperlapse, highlight reels…) are
 skipped by design; `.mov` (15) and `.avi` (2) are not handled. MediaMuxer writes `moov` at the
@@ -56,16 +79,20 @@ skipped by design; `.mov` (15) and `.avi` (2) are not handled. MediaMuxer writes
 
 ### Open problems
 
-a. **`addBitmap` has no timeout.** Any HEIC encoder stall wedges the run; the 64 MP ceiling avoids
-   the one known trigger but is not a general guard (the call blocks inside EGL).
+a. **Encode stalls now end the run instead of wedging it** (`c6c7ff9`): each photo's write runs on
+   its own thread with a 2-minute limit; a stuck one is abandoned (it cannot be stopped, and keeps
+   its bitmap), `HeicEncoder.wedged` is set and the run ends asking for an app restart. Untested
+   on a real stall — the 64 MP ceiling still avoids the one known trigger.
 
 b. **Old panoramas "don't convert" — not a bug.** They encode, then lose to "Only keep if
    smaller": 2014–16 panoramas are ~0.29 bytes/px, and HeifWriter's bitrate caps near 0.3 at
    quality 80. Lowering quality for them is **the user's call**.
 
-c. **Consent prompts cannot be passed unattended.** Photo runs stop every 500, videos 25, music
-   100, repairs once. If the screen locks while MediaProvider's dialog is up it is dismissed and
-   does not re-raise; Cancel and start again recovers. A "resume pending prompt" would be better.
+c. **Consent prompts still need a person**, but a dismissed one is no longer lost (`c6c7ff9`):
+   locking the screen closes MediaProvider's dialog with no result, which left the batch "in
+   flight" forever. On resume, one in flight for over 2 s is raised again (an answer arrives just
+   before resume with the next batch launched in that moment, hence the margin); a "Show the
+   prompt again" button appears while a run waits. Untested on the phone.
 
 d. **MediaProvider rarely rescans a same-length rewrite** — why both repairs end with an explicit
    rescan step. A rewrite that grows the file is mostly picked up on close.
@@ -79,8 +106,11 @@ f. **"Not smaller" songs are re-encoded on every music run** — nothing remembe
 
 g. **Music converted before `f943f48` was verified only against what was decoded**, not the
    source's length. Truncation was only ever seen from Samsung's FLAC extractor; MP3/M4A spot
-   checks while both existed were 34–83 ms short (codec padding). Their originals are deleted, so
-   the rest cannot be re-checked.
+   checks while both existed were 34–83 ms short (codec padding). Their originals are deleted;
+   step 2 above checks the readers themselves instead.
+
+h. **Dry run takes as long as a real run** (it encodes everything). Sampling ~30 files and
+   extrapolating was offered; the user chose the plain toggle.
 
 ### App settings as left
 
@@ -208,13 +238,16 @@ adb usb        # RESTORE THIS AFTERWARDS - otherwise adbd keeps listening on the
 When the device goes `offline`, `adb kill-server; adb start-server` usually recovers it. On a
 Wi-Fi transport, `adb disconnect <ip>:5555; adb connect <ip>:5555` is quicker.
 
-**Never install while a run is going** — `install -r` kills it, and a music/photo run loses its
-pending delete batch (those originals then count as "already converted" and are never offered
-again; "Clean up leftovers" is the way back). Check first:
+**Never install while a run is going** — `install -r` kills it, and a run loses its pending delete
+batch (those originals then count as "already converted" and are never offered again; "Clean up
+leftovers" is the way back). Check first:
 
 ```powershell
-adb shell 'dumpsys activity services com.example.convertjpgtoheic | grep -c "ServiceRecord.*ConversionService"'   # 0 = idle
+$svc = (adb shell 'dumpsys activity services com.example.convertjpgtoheic | grep -c "ServiceRecord.*ConversionService"').Trim()   # "0" = idle
 ```
+
+Test the **string**, not `$LASTEXITCODE`: `grep -c` exits 1 when it counts nothing, so "idle" looks
+like a failure (an install was skipped that way).
 
 **Shell traps that cost time:**
 - **Use PowerShell for adb, not Git Bash** — Bash rewrites POSIX paths (`/data/local/tmp/x` became
@@ -227,8 +260,11 @@ adb shell 'dumpsys activity services com.example.convertjpgtoheic | grep -c "Ser
   binary data is unreliable — split it with `tr -c 'a-z0-9' '\n'` first.
 - `python -I` ignores `PYTHONIOENCODING`; call `sys.stdout.reconfigure(encoding='utf-8')`.
 
-**logcat's main buffer is 5 MB** and holds about an hour of a run. `MusicConverter` logs every
-failure ("Not converting X: reason") and a per-song length line; read them soon after a run.
+**Run logs** (since `13a23ee`): one text file per run in
+`/storage/emulated/0/Android/data/com.example.convertjpgtoheic/files/logs/run-<time>-<mode>.txt`,
+30 kept. Mode and options, **every** failure with its reason (`RunReport.withFailure` writes it),
+the music converter's per-song length lines and cover shrinks, and a summary of every count. Read
+with `adb shell cat`. Prefer it to logcat, whose main buffer is 5 MB — about an hour of a run.
 
 **The phone must be unlocked to drive the app UI.** `am start` launches MainActivity *behind* the
 lock screen. Wake with `input keyevent KEYCODE_WAKEUP`, but unlocking needs the user. With the
