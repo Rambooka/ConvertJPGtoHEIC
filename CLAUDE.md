@@ -1,7 +1,9 @@
 # ConvertJPGtoHEIC — working notes
 
-Android app that bulk-converts a phone's JPG library to HEIC via `androidx.heifwriter`,
-publishes through MediaStore, and offers to delete the originals.
+Android app that shrinks a phone's media library in place and offers to delete the originals:
+JPG → HEIC (`androidx.heifwriter`), H.264 → HEVC video, and MP3 / M4A (AAC) / FLAC → Opus music.
+Everything is published through MediaStore. Also repairs earlier output (photo dates and rotation,
+music years) and cleans up leftovers.
 
 ## Build
 
@@ -12,113 +14,110 @@ JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:testDebug
 
 APK lands at `app/build/outputs/apk/debug/app-debug.apk`.
 
+Real-file tests are skipped unless a folder of samples is named: `REPAIR_SAMPLES_DIR` (.heic),
+`M4A_SAMPLES_DIR`, `FLAC_SAMPLES_DIR`, `OPUS_SAMPLES_DIR`. Pull samples from the phone into the
+scratchpad, never into the repo.
+
 ---
 
-## PICK UP HERE (2026-09-26, evening)
+## PICK UP HERE (2026-10-19, evening)
 
-Everything below is on branch `fix/encoder-thread-leak-and-pixel-ceiling` (pushed, **not merged
-to `main`**). Installed on the phone and verified there.
+Branch **`fix/music-oversized-cover-art`**: 12 commits, pushed, **not merged to `main`** (the user
+has not chosen PR or direct merge). The earlier photo/video branch is merged. The current build is
+installed on the phone.
 
-### 1. Done and proven on the device
+### Running when the user left
 
-**Wedging runs** (thread leak, bitmap budget, 64 MP ceiling) — see "Two ways a run used to wedge".
-Held over a ~4 h unattended run: 50 threads flat, 0 failures.
+1. **FLAC → Opus** (12 Katy Perry "Smile" FLACs, 263 MB). Re-run with the new `FlacFrames` reader
+   after the first copies were found truncated (see "Samsung's FLAC extractor"). The first two
+   came out within 19–23 ms of the FLAC; the user was told to accept the delete prompt. **Check**:
+   every `.opus` in `Music/Katy Perry/…FLAC [Hunter]/` against the FLAC's duration, or the log's
+   per-song line (`… samples out … = X ms · file says Y ms`).
+2. **Photos 2020 → 2026** next ("Convert pictures to HEIC"): 6,030 camera JPGs from 2023–24, 16 GB,
+   never converted only because the range had been 1 Sep–26 Oct 2026. None sampled were motion
+   photos. Afterwards "Clean up leftovers" for the 423 JPGs (1.4 GB) that already have a HEIC.
 
-**Converter output is now correct for new conversions** (`ConversionEngine.anchorCaptureTime`):
-- EXIF Orientation is **kept** matching the container `irot` (how Samsung's camera writes HEIC).
-  It used to be zeroed, which left MediaStore's `orientation` column — read from EXIF alone — at 0.
-- `OffsetTimeOriginal` is added, plus `DateTimeOriginal` when a file has only `DateTime`
-  (Google PhotoScan). See "Why converted photos lost their dates" below.
+### Library state (survey of 19 Oct; 225 GB phone, 184 GB used)
 
-**"Repair converted photos" button** (`HeicRepair`, `HeifExif`, `ExifEditor`) fixed the existing
-library in place — EXIF only, the image never re-encoded. Result of the full run:
-**4,084 dates restored, 15,351 rotations fixed**, confirmed from MediaStore (undated HEICs
-4,168 → 84; orientation ≠ 0: 20 → 15,371). Pre-flighted on 20 real files first: all verified, all
-decode identically in Windows' HEIF codec.
+| What | Size | Status |
+|---|---|---|
+| HEIC | 28,468 · 59.7 GB | done |
+| JPG ≥ 1 MB | 6,355 · 16.9 GB | being converted (above) |
+| JPG < 1 MB | 4,047 · 1.0 GB | skipped by `skipSmall`; little to gain |
+| Video already HEVC | 355 · 11.6 GB | done |
+| **Video H.264** | **154 · 3.25 GB** | **not yet run** — ~1.3 GB at the ~40% measured |
+| Opus music | 1,333 · 5.8 GB | done; 1,221 given a YEAR by the repair, 108 have no date at all |
+| `.m4p` (FairPlay) | 2 · 7 MB | cannot be decoded; "Delete copy-protected songs" offers them |
+| GIF / PNG | 103 · 0.94 GB / 88 · 0.92 GB | not handled; would mean a format change |
 
-**Estimated completion time** on every repair step (`Eta`); the refresh step shows "X of Y", and
-waits while the scanner is still making progress instead of on a fixed clock.
+Old video notes still apply: SEF-trailer videos (slow-mo, hyperlapse, highlight reels…) are
+skipped by design; `.mov` (15) and `.avi` (2) are not handled. MediaMuxer writes `moov` at the
+**start**, so any edit that grows it must shift every `stco`/`co64` offset.
 
-**"Convert videos to HEVC" button** (`VideoConverter`, `Mp4Metadata`) — first milestone done:
-- 720p30 test (6 clips, 140 MB): **83 MB, 40% saved**, ~5× real time.
-- 1080p60 test (28 s, 78 MB): **44 MB, 43% saved**, encoded in **3.9 s** (~7× real time).
-- Every copy verified: `hvc1`, identical `mvhd` capture time, `©xyz` location, rotation matrix,
-  frame rate; AAC audio passed through. The user compared them on the phone and in VLC:
-  identical, and the correct way up.
+### Open problems
 
-### 2. Next steps
+a. **`addBitmap` has no timeout.** Any HEIC encoder stall wedges the run; the 64 MP ceiling avoids
+   the one known trigger but is not a general guard (the call blocks inside EGL).
 
-1. **Video: delete-then-rename is proven.** 6 videos (14–26 Oct 2021, one in `DCIM/Hannah/`):
-   101 MB → 60 MB, originals deleted after the prompt, each `_HEVC` copy renamed to the original's
-   name in the original folder with an identical `datetaken`; confirmed `hvc1` and `©xyz` on disk.
-   Note MediaMuxer writes `moov` at the **start** of the file (the camera puts it at the end), so
-   any future edit that *grows* `moov` must shift every `stco`/`co64` offset.
-2. **Video: a long run**, to see thermal throttling. 540 videos / 18.4 GB; at the measured pace
-   roughly 20–40 minutes of encoding.
-3. **Video bitrate** is 55% of the source's (`HEVC_BITRATE_SHARE`), deliberately conservative: the
-   result was visually identical. Lower is probably fine; ffmpeg SSIM would settle it (not
-   installed — ask before `winget install Gyan.FFmpeg`).
-4. **Video: what the full run will skip** (scanned all 542 videos, 18.4 GB). Any video ending in
-   a Samsung SEF trailer is currently skipped — 75 videos, 2.7 GB:
+b. **Old panoramas "don't convert" — not a bug.** They encode, then lose to "Only keep if
+   smaller": 2014–16 panoramas are ~0.29 bytes/px, and HeifWriter's bitrate caps near 0.3 at
+   quality 80. Lowering quality for them is **the user's call**.
 
-   | SEF record | videos | size | notes |
-   |---|---|---|---|
-   | `SlowMotion_Data` | 7 | 628 MB | skip — user's decision |
-   | `HyperLapse_Data_Speed` | 17 | 387 MB | skip — user's decision |
-   | `HighlightVideo_Data` only | 32 | 1,250 MB | Gallery's auto highlight reel ("AutoSum"), 300–540 B. Ordinary videos |
-   | `Single_Take_*` | 16 | 350 MB | part of a Single Take group |
-   | `Directors_View_Info` | 2 | 63 MB | multi-camera recording |
-   | `VideoEditor_Re_Edit_Data` | 1 | 61 MB | Samsung editor project |
+c. **Consent prompts cannot be passed unattended.** Photo runs stop every 500, videos 25, music
+   100, repairs once. If the screen locks while MediaProvider's dialog is up it is dismissed and
+   does not re-raise; Cancel and start again recovers. A "resume pending prompt" would be better.
 
-   **Offered and deferred by the user:** convert the `HighlightVideo_Data`-only videos too, copying
-   the SEF trailer across verbatim after the last box (its offsets are self-relative, and
-   MediaMuxer output ends in `mdat`), for ~0.5 GB more. Keep skipping the rest. Match on record
-   *types* (0x08b0 highlight, 0x0890 slow-mo, 0x0d00 hyperlapse), not names: in some files the
-   records sit more than 3 KB before EOF.
+d. **MediaProvider rarely rescans a same-length rewrite** — why both repairs end with an explicit
+   rescan step. A rewrite that grows the file is mostly picked up on close.
 
-   Also not handled yet: `.mov` (15), `.avi` (2), anything above 4K.
-5. **Photos: 84 HEICs remain undated** — expected to be images with no capture time anywhere
-   (downloads, templates). Check the repair report's "No date anywhere" count against that.
+e. **Music is slow, and much slower with the screen off.** `DefaultDispatch` (our Kotlin
+   `Resampler` and PCM copying) is the bottleneck: ~3.5× real time on the big cores. Screen off,
+   Samsung moves the app to cgroup `cpu:/background`, cpuset `/moderate` (cores 0–2): 7–17 min a
+   song. Speeding up `Resampler` (both channels per tap pass, fewer allocations) is the lever.
 
-### 3. Open problems
+f. **"Not smaller" songs are re-encoded on every music run** — nothing remembers them.
 
-**a. `addBitmap` has no timeout.** Any encoder stall wedges the whole run with no way out —
-`writer.stop(STOP_TIMEOUT_MS)` is never reached because the block happens earlier. The 64 MP
-ceiling avoids the one known trigger but is not a general guard. A real watchdog is awkward: the
-call blocks on the calling thread inside EGL, so timing it out means abandoning a thread
-mid-render.
+g. **Music converted before `f943f48` was verified only against what was decoded**, not the
+   source's length. Truncation was only ever seen from Samsung's FLAC extractor; MP3/M4A spot
+   checks while both existed were 34–83 ms short (codec padding). Their originals are deleted, so
+   the rest cannot be re-checked.
 
-**b. Old panoramas "don't convert" — the original reported bug, and NOT a bug.** They encode
-fine, then get discarded by "Only keep if smaller". 2014–2016 panoramas are already compressed to
-~0.29 bytes/px; HeifWriter's bitrate formula (`w*h*1.5*8*0.25*quality/100`) caps around
-0.3 bytes/px at quality 80, so the HEIC comes out marginally larger. **The user's call** whether
-to lower quality for them.
+### App settings as left
 
-**c. Two non-zero orphaned pending files** from the wedged runs, left because they hold real
-data: `DCIM/Camera/.pending-1790830549-20220129_131506.heic` (412318) and
-`.pending-1790465830-20190526_124424.heic` (415896). Provably stale now — safe to remove, with
-the user's OK.
+`deleteOriginals=true`, `shrinkOversized=true`, `motionPolicy=DROP_VIDEO`; the range was set by the
+user to cover 2020–2026 for the photo run. Back up `conversion.xml` before touching it.
 
-**d. A run cannot pass a consent prompt unattended.** Photo runs suspend on the delete prompt
-every 500, the repair on its "allow changes" prompt, videos every 25. If the screen locks while
-MediaProvider's dialog is up, the dialog is dismissed and **does not re-raise** (`dumpsys` showed
-`PermissionActivity ... isExiting`). Cancel and start again recovers, but a "resume pending
-prompt" affordance would be better.
+---
 
-**e. MediaProvider rarely rescans a same-length rewrite.** A rotation-only repair is a 2-byte
-in-place patch; most were not picked up until rescanned explicitly (~4 files/s). That is why the
-repair has a slow "Refreshing the gallery" step. Date fixes grow the file and were mostly picked
-up on close.
+## Music conversion: what Android gets wrong
 
-### 4. State left on the device
+Each of these silently broke converted songs before it was found; each is now handled, with the
+AOSP source location quoted in the code.
 
-The 7 `*_HEVC.mp4` copies from the keep-originals tests were deleted (originals intact), so
-those videos will be converted normally.
+- **Ogg packets over 16 MB are rejected** (`OggExtractor`, "arbitrary limit", b/36592202), and the
+  file then reports **0 tracks**. Cover art rides base64 (+33%) in the OpusTags packet, so a
+  24 MB PNG cover (Aqua "Megalomania") broke every song. Pictures over 2 MB are now re-encoded as
+  JPEG ≤ 2000 px; tag size is checked before encoding.
+- **Ogg cover art must be picture type 3** (`MetaDataUtils::extractAlbumArt` skips anything else),
+  while the MP3 reader shows any APIC. Taggers write 0, some 255. The first picture is made the
+  front cover; **only that one is kept** — booklet scans (11 per track on Delta Goodrem "Delta")
+  made copies no smaller than the MP3.
+- **`YEAR`, not `DATE`, is the year** (`parseVorbisComment`: DATE → a date MediaStore never shows).
+  Copies get both. "Repair converted music files" adds YEAR to old copies: retag into the cache,
+  require identical audio page for page (`OggOpus.sameAudio`), overwrite in place (keeps the
+  MediaStore row and playlists), compare byte for byte.
+- **MediaStore mislabels `.m4a` as `audio/mpeg`** (a whole Little Mix album), so the query also
+  matches by name, and the real codec is checked at decode. `.m4p` is excluded: FairPlay, the
+  audio is encrypted (`audio/unknown`, duration 0).
+- **Samsung's FLAC extractor (`SFLACExtractor`) ends streams early** — 0.4–47 s, varying with
+  timing — and stamps every frame at time 0. Android picks it over the AOSP one. `FlacFrames`
+  now splits frames itself (header CRC-8 + frame number + frame CRC-16, so in-audio sync patterns
+  never split a frame) and feeds `c2.android.flac.decoder` with `fLaC`+STREAMINFO as csd-0.
+  A FLAC must decode to exactly STREAMINFO's sample count; every format must decode to within
+  1 s / 2% of its container's length.
 
-**App settings as left, at the user's request:** range **1 Jan 2000 → 26 Sep 2026** (covers all
-542 videos and all photos), **Delete originals on**, `shrinkOversized=true`,
-`motionPolicy=DROP_VIDEO`. The full video run has **not** been started. The user's older
-photo range (from 2021-09-16) is superseded by this.
+MediaStore lists Opus as `audio/ogg`. `.opus` rather than `.ogg` because jaudiotagger-based
+editors take `.ogg` to be Vorbis.
 
 ---
 
@@ -190,37 +189,50 @@ points, **not** a measured threshold; bisect it if it ever matters.
 
 Test device: **SM-G998B** (Galaxy S21 Ultra, Exynos), Android 15, **Mali-G78**.
 `GL_MAX_TEXTURE_SIZE` is >= 12000 (so 16384, not the 8192 Mali is often assumed to report).
-`dalvik.vm.heapsize=512m`, `heapgrowthlimit=256m`. Library is large (~25k HEIC, ~18k JPG) and the
-phone runs close to full memory — treat low-memory behaviour as the normal case, not the edge.
+`dalvik.vm.heapsize=512m`, `heapgrowthlimit=256m`. Library is large and the phone runs close to
+full memory — treat low-memory behaviour as the normal case, not the edge.
 
-**adb** is not on PATH: `C:\Users\RayAb\AppData\Local\Android\Sdk\platform-tools\adb.exe`
-
-**Use PowerShell for adb, not the Bash tool.** Git Bash rewrites POSIX paths — an
-`adb push ... /data/local/tmp/x.apk` silently became `C:/Program Files/Git/data/local/tmp/x.apk`.
-Cost real time before it was spotted.
-
-**The USB cable is faulty in the write direction.** Reads were fine all day (38 MB pulls at
-34 MB/s); every ~15 MB *write* died mid-transfer with `failed to read copy response: EOF`, often
-leaving a 0-byte file, and knocked the device to `offline`. This masqueraded convincingly as
-device memory pressure. **Wi-Fi ADB installed the same APK first try** — use that until the cable
-is replaced:
+**adb** is not on PATH. Two development PCs:
+- `C:\Users\rabram\AppData\Local\Android\Sdk\platform-tools\adb.exe` (ICT laptop). USB installs
+  worked all day on 19 Oct. A new PC shows `unauthorized` until the phone's prompt is accepted.
+- `C:\Users\RayAb\AppData\Local\Android\Sdk\platform-tools\adb.exe` (home). **Its USB cable was
+  faulty in the write direction**: reads fine, every ~15 MB write died with `failed to read copy
+  response: EOF` and knocked the device `offline` — it looked like memory pressure. Use Wi-Fi ADB
+  there:
 
 ```powershell
 adb tcpip 5555; adb connect <phone-ip>:5555; adb -s <ip>:5555 install -r <apk>
 adb usb        # RESTORE THIS AFTERWARDS - otherwise adbd keeps listening on the network
 ```
 
-When the device goes `offline`, `adb kill-server; adb start-server` usually recovers it; it
-sometimes takes several cycles. On a Wi-Fi transport, `adb disconnect <ip>:5555; adb connect
-<ip>:5555` is quicker and does not disturb a USB transport in the same session.
+When the device goes `offline`, `adb kill-server; adb start-server` usually recovers it. On a
+Wi-Fi transport, `adb disconnect <ip>:5555; adb connect <ip>:5555` is quicker.
 
-`adb tcpip 5555` needs an existing connection, so re-enabling Wi-Fi ADB after `adb usb` requires
-the cable once (a tiny control command — the faulty cable copes fine), or pairing via
-Developer options → Wireless debugging.
+**Never install while a run is going** — `install -r` kills it, and a music/photo run loses its
+pending delete batch (those originals then count as "already converted" and are never offered
+again; "Clean up leftovers" is the way back). Check first:
 
-**The phone must be unlocked to drive the app UI.** `am start` will happily launch MainActivity
-*behind* the lock screen, and the screenshot then shows the lock screen while `dumpsys` reports
-the activity focused. Wake with `input keyevent KEYCODE_WAKEUP`, but unlocking needs the user.
+```powershell
+adb shell 'dumpsys activity services com.example.convertjpgtoheic | grep -c "ServiceRecord.*ConversionService"'   # 0 = idle
+```
+
+**Shell traps that cost time:**
+- **Use PowerShell for adb, not Git Bash** — Bash rewrites POSIX paths (`/data/local/tmp/x` became
+  `C:/Program Files/Git/data/local/tmp/x`).
+- `content query --where` with SQL quotes: wrap the whole `adb shell` argument in single quotes and
+  double the inner ones — `'content query … --where "relative_path=''Music/X/''"'`.
+- A nested `-match` inside a PowerShell loop **overwrites `$matches`** — clone it first.
+- `git commit -m "…\"…\"…"` breaks in PowerShell; commit from Bash with a heredoc.
+- On the phone, `sh` arithmetic is 32-bit (sizes overflow — sum in `awk`), and `grep -a` on large
+  binary data is unreliable — split it with `tr -c 'a-z0-9' '\n'` first.
+- `python -I` ignores `PYTHONIOENCODING`; call `sys.stdout.reconfigure(encoding='utf-8')`.
+
+**logcat's main buffer is 5 MB** and holds about an hour of a run. `MusicConverter` logs every
+failure ("Not converting X: reason") and a per-song length line; read them soon after a run.
+
+**The phone must be unlocked to drive the app UI.** `am start` launches MainActivity *behind* the
+lock screen. Wake with `input keyevent KEYCODE_WAKEUP`, but unlocking needs the user. With the
+screen on, `uiautomator dump` + pulling the XML reads the report text without a screenshot.
 
 ### Setting app options without the UI
 
@@ -235,7 +247,7 @@ adb shell "run-as com.example.convertjpgtoheic sh -c 'echo <BASE64> | base64 -d 
 Keys: `quality`, `deleteOriginals`, `onlyIfSmaller`, `skipSmall`, `shrinkOversized`,
 `skipAlreadyConverted`, `motionPolicy`, `rangeStart`, `rangeEnd` (both epoch ms).
 **Back the file up first and restore it afterwards** — these are the user's real settings.
-`ConversionService` is not exported, so a run still has to be started by tapping Convert.
+`ConversionService` is not exported, so a run still has to be started by tapping a button.
 
 ## Diagnosing a frozen run
 
@@ -248,15 +260,25 @@ adb shell "cut -d' ' -f14 /proc/<pid>/stat; sleep 4; cut -d' ' -f14 /proc/<pid>/
 
 # thread census - catches leaks instantly
 adb shell "cat /proc/<pid>/task/*/comm" | sort | uniq -c | sort -rn
+
+# which thread is busy, and which cores the app may use
+adb shell 'for t in /proc/<pid>/task/*; do echo "$(cut -d" " -f14,15 $t/stat) $(cat $t/comm)"; done'
+adb shell 'cat /proc/<pid>/cpuset; grep cpu /proc/<pid>/cgroup'
 ```
 
-Healthy during a run: ~45-55 threads, exactly one `heic-encode`, zero `HeifEncoderThread`.
+Healthy photo run: ~45-55 threads, exactly one `heic-encode`, zero `HeifEncoderThread`.
+Music runs: the Codec2 software codecs run in-process (`MediaCodec_loop` threads), not in
+`media.swcodec`.
 
 Library sources for reading `HeifWriter` internals (no network needed):
 
 ```
 ~/.gradle/caches/modules-2/files-2.1/androidx.heifwriter/heifwriter/1.1.0/*/heifwriter-1.1.0-sources.jar
 ```
+
+AOSP sources come base64-encoded from
+`https://android.googlesource.com/platform/frameworks/av/+/refs/heads/main/<path>?format=TEXT`
+(e.g. `media/module/extractors/ogg/OggExtractor.cpp`, `media/module/metadatautils/MetaDataUtils.cpp`).
 
 ## Reading the progress counters
 
@@ -268,3 +290,6 @@ there is no per-file log line.
 Photos are processed **oldest first** (`DATE_TAKEN ASC, DATE_MODIFIED ASC`), and rows with a NULL
 `DATE_TAKEN` sort first. Early in a run `converted` stays at 0 for a long time — that is expected,
 not a fault: old photos are small and already compressed. Savings start at the newer end.
+
+Music is processed **folder by folder, alphabetically**; songs with an `.opus` beside them are
+skipped instantly, so the counter can jump straight to song 91.
