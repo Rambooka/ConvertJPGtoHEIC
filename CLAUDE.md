@@ -39,20 +39,13 @@ into the scratchpad, never into the repo.
 Branch **`fix/music-oversized-cover-art`**: 22 commits, pushed, **not merged to `main`** (the user
 has not chosen PR or direct merge). The earlier photo/video branch is merged.
 
-### Waiting on the phone
+### Verified on the phone (20 Oct)
 
-A run was going when the session ended, so the last commits are **built but not installed**
-(the phone has `ca2ae9b`). Once it is idle:
-
-1. Install `app-debug.apk`, then the test APK, and run the device tests (command above). Nothing
-   of `e3b6a92`…`171787b` has run on the phone yet: video per-track length check, encode
-   watchdog, prompt re-raise, run log, device tests.
-2. **Check the MP3/M4A readers deliver whole songs** — the last open part of "music verified only
-   against what was decoded" (see g). Push the samples kept in the scratchpad (`mp3/playmate.mp3`,
-   `blessed.mp3`, `delta.mp3`, `m4a/salute.m4a`, `girls.m4a`) into a temporary music folder, have
-   the user turn on Dry run and tap Convert music, read each song's line in the run log
-   (`… samples out … = X ms · file says Y ms`), then delete the folder.
-3. Confirm a run log appears under `Android/data/com.example.convertjpgtoheic/files/logs/`.
+The build at `1a725c8` is installed. All 5 device tests pass. A run log is written per run. The
+MP3/M4A readers deliver whole songs — test copies through a dry run decoded to 0–12 ms of their
+length, the rest exactly the encoder padding the files declare (an iTunes M4A's 2,112 + 708
+samples, trimmed for gapless play), so the music converted before `f943f48` is sound (see g).
+Still untested on a real case: the encode watchdog and the prompt re-raise (a, c).
 
 ### Library state (20 Oct; 225 GB phone, 49 GB free, from 40 GB on the 19th)
 
@@ -106,8 +99,8 @@ f. **"Not smaller" songs are re-encoded on every music run** — nothing remembe
 
 g. **Music converted before `f943f48` was verified only against what was decoded**, not the
    source's length. Truncation was only ever seen from Samsung's FLAC extractor; MP3/M4A spot
-   checks while both existed were 34–83 ms short (codec padding). Their originals are deleted;
-   step 2 above checks the readers themselves instead.
+   checks while both existed were 34–83 ms short (codec padding). **Settled on 20 Oct**: the
+   readers themselves deliver whole songs (above), so those copies are sound.
 
 h. **Dry run takes as long as a real run** (it encodes everything). Sampling ~30 files and
    extrapolating was offered; the user chose the plain toggle.
