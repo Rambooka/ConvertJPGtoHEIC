@@ -52,6 +52,9 @@
     <string name="opt_dry_run_hint">Pictures, videos and music are converted to measure the real
         saving, then thrown away. Nothing is added and nothing deleted. Takes as long as a real run.
         Off again each time the app opens.</string>
+    <string name="action_convert_hint">Re-encodes the JPG and PNG pictures in this range as HEIC,
+        usually about half the size, keeping dates, location and rotation. Uses the quality, options
+        and delete setting above; each HEIC is checked before its original is offered for deletion.</string>
     <string name="action_convert">Convert pictures to HEIC</string>
     <string name="action_cleanup">Clean up leftovers</string>
     <string name="action_cleanup_hint">Deletes originals that were converted but never removed,
