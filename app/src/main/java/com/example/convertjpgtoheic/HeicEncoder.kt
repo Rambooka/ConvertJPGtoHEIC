@@ -252,6 +252,7 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
         allowShrink: Boolean,
         trailerStart: Long?,
     ): EncodeResult {
+        if (wedged) return EncodeResult.Failure("the encoder is stuck; close and reopen the app")
         val decoded = try {
             decode(photo, allowShrink)
         } catch (e: OutOfMemoryError) {
@@ -265,6 +266,8 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
         val bitmap = decoded.bitmap
         val width = bitmap.width
         val height = bitmap.height
+        // Set when the encode is abandoned: the stuck writer is still reading the bitmap.
+        var stillInUse = false
 
         return try {
             writeHeif(target, bitmap, quality, metadata.exif, rotationDegrees)
@@ -280,6 +283,9 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
                 bytes = sizeOf(target)
             }
             EncodeResult.Success(bytes, width, height, (target as? HeicTarget.Staging)?.file, decoded.downscaled)
+        } catch (e: EncoderStalled) {
+            stillInUse = true
+            EncodeResult.Failure("the encoder stopped responding (gave up after ${ENCODE_TIMEOUT_MS / 1000} s)")
         } catch (e: Exception) {
             Log.e(TAG, "HEIC encode failed for ${photo.displayName}", e)
             // Include the message, not just the class. FileNotFoundException alone cannot
@@ -290,7 +296,7 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
             Log.e(TAG, "Out of memory encoding ${photo.displayName}", e)
             EncodeResult.Failure("too large to encode (out of memory)")
         } finally {
-            bitmap.recycle()
+            if (!stillInUse) bitmap.recycle()
         }
     }
 
@@ -484,7 +490,7 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
 
         // Grid mode (on by default) tiles the image for the HEVC encoder, which is what lets a
         // full-resolution phone photo through at all.
-        builder
+        val configured = builder
             .setQuality(quality)
             .setMaxImages(1)
             .setPrimaryIndex(0)
@@ -494,16 +500,51 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
             .setRotation(rotationDegrees)
             // One shared looper instead of two fresh threads per photo. See [encoderThread].
             .setHandler(handler)
-            .build()
-            .use { writer ->
-                writer.start()
-                if (exif != null) writer.addExifData(0, exif, 0, exif.size)
-                writer.addBitmap(bitmap)
-                writer.stop(STOP_TIMEOUT_MS)
+
+        // addBitmap blocks inside EGL with no timeout of its own, and a stalled encoder used to
+        // wedge the whole run with nothing able to end it. So the write runs on a thread of its
+        // own, watched from here. One that never finishes cannot be stopped — it is stuck in the
+        // GPU driver — so it is abandoned, still holding the bitmap, and [wedged] is set.
+        val finished = CountDownLatch(1)
+        var failure: Throwable? = null
+        Thread({
+            try {
+                configured.build().use { writer ->
+                    writer.start()
+                    if (exif != null) writer.addExifData(0, exif, 0, exif.size)
+                    writer.addBitmap(bitmap)
+                    writer.stop(STOP_TIMEOUT_MS)
+                }
+            } catch (t: Throwable) {
+                failure = t
+            } finally {
+                finished.countDown()
             }
+        }, "heic-write").start()
+
+        if (!finished.await(ENCODE_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            Log.e(TAG, "HEIC encode did not finish within ${ENCODE_TIMEOUT_MS / 1000} s; abandoning it")
+            wedged = true
+            // Its looper may still be wanted by the stuck writer; leave it, and never reuse it.
+            encoderThread = null
+            throw EncoderStalled()
+        }
+        failure?.let { throw it }
 
         awaitClose(handler)
     }
+
+    /** The encoder stopped responding mid-photo; see [wedged]. */
+    class EncoderStalled : Exception("the encoder stopped responding")
+
+    /**
+     * An encode was abandoned, stuck in the GPU driver. Nothing further is encoded until the app
+     * is restarted: the next one would most likely stick too, and the stuck one still holds its
+     * bitmap's memory.
+     */
+    @Volatile
+    var wedged = false
+        private set
 
     /**
      * Waits for the close [HeifWriter.close] queued to finish.
@@ -542,6 +583,10 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
     companion object {
         private const val TAG = "HeicEncoder"
         private const val STOP_TIMEOUT_MS = 60_000L
+
+        /** How long one photo's encode may take before it counts as stuck. A 64 MP photo, the
+         *  largest let through, takes well under a minute; a stall never ends. */
+        private const val ENCODE_TIMEOUT_MS = 120_000L
 
         /** ARGB_8888. */
         private const val BYTES_PER_PIXEL = 4

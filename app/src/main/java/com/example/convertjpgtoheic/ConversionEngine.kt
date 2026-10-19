@@ -6,6 +6,7 @@ import android.content.ContentUris
 import android.content.Context
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
 import androidx.core.content.ContextCompat
@@ -460,6 +461,9 @@ class ConversionEngine private constructor(context: Context) {
 
         /** A dialog is on screen; do not raise a second one for the same batch. */
         var inFlight = false
+
+        /** When the dialog in flight was launched ([SystemClock.elapsedRealtime]). */
+        var launchedAt = 0L
         val outcome = CompletableDeferred<Boolean>()
     }
 
@@ -688,6 +692,14 @@ class ConversionEngine private constructor(context: Context) {
                 } else {
                     convertOne(options, photo, metadata, motionOutcome, trailerStart, rotation == null,
                         forEncoding, rotation ?: 0, tally, toDelete)
+                }
+
+                // A stuck encode was abandoned. End the run here rather than stall on every photo
+                // after it; what was converted is kept and its originals are still offered.
+                if (encoder.wedged) {
+                    tally = tally.withFailure(ENCODER_STALLED)
+                    endedEarly = true
+                    break
                 }
 
                 if (deleteAsWeGo && shouldFlushDeletions(toDelete.size, index)) {
@@ -1751,6 +1763,28 @@ class ConversionEngine private constructor(context: Context) {
         _deletionRequest.value = batch
     }
 
+    /**
+     * Raises the confirmation again when the one on screen was dismissed without an answer.
+     *
+     * Locking the screen while MediaProvider's dialog is up closes it and sends no result, so the
+     * batch stayed marked in flight and was never asked again — the run sat waiting for good. The
+     * Activity calls this when it is back in front, which no system dialog can be while it is, and
+     * from its "Show the prompt again" button ([force]).
+     *
+     * Not forced, a dialog launched in the last [ABANDONED_AFTER_MS] is left alone: an answer is
+     * delivered just before the Activity resumes, and the next batch's dialog is launched in that
+     * same moment, so at resume it is in flight for real and raising it again would show it twice.
+     */
+    fun reraiseAbandonedPrompt(force: Boolean = false) {
+        synchronized(deletionLock) {
+            val request = pendingDeletion ?: return
+            if (!request.inFlight) return@synchronized
+            if (!force && SystemClock.elapsedRealtime() - request.launchedAt < ABANDONED_AFTER_MS) return
+            request.inFlight = false
+        }
+        requestNextDeletionBatch()
+    }
+
     fun createDeleteIntentSender(uris: List<Uri>) =
         MediaStore.createDeleteRequest(app.contentResolver, uris).intentSender
 
@@ -1794,7 +1828,12 @@ class ConversionEngine private constructor(context: Context) {
     /** Clears the request once the Activity has launched it, so a restarted collector cannot
      *  replay it and raise the confirmation dialog twice. */
     fun consumeDeletionRequest() {
-        synchronized(deletionLock) { pendingDeletion?.inFlight = true }
+        synchronized(deletionLock) {
+            pendingDeletion?.let {
+                it.inFlight = true
+                it.launchedAt = SystemClock.elapsedRealtime()
+            }
+        }
         _deletionRequest.value = null
     }
 
@@ -1828,6 +1867,9 @@ class ConversionEngine private constructor(context: Context) {
 
     companion object {
         private const val TAG = "ConversionEngine"
+
+        /** How long a consent dialog must have been up before a resume counts it as dismissed. */
+        private const val ABANDONED_AFTER_MS = 2_000L
 
         /** Keeps the URI list well inside the binder transaction limit for one delete dialog. */
         private const val DELETE_BATCH_SIZE = 500
@@ -1875,6 +1917,8 @@ class ConversionEngine private constructor(context: Context) {
         const val NO_OPUS_ENCODER = "This device has no Opus encoder, so music cannot be converted."
 
         const val NO_ENCODER = "This device has no HEIC (HEVC) encoder, so nothing can be converted."
+        const val ENCODER_STALLED = "The HEIC encoder stopped responding, so the run was ended. " +
+            "Everything converted so far is kept. Close the app fully (swipe it away) and start again."
 
         // Holds the *application* context, so it lives exactly as long as the process it is
         // meant to: that is the point of putting the run here instead of in a ViewModel.

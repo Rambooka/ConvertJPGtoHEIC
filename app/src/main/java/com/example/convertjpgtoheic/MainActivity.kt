@@ -126,6 +126,7 @@ class MainActivity : AppCompatActivity() {
         binding.musicRepairButton.setOnClickListener { confirmThenRepairMusic() }
         binding.deleteProtectedButton.setOnClickListener { confirmThenDeleteProtected() }
         binding.cancelButton.setOnClickListener { engine.cancel() }
+        binding.reshowPromptButton.setOnClickListener { engine.reraiseAbandonedPrompt(force = true) }
 
         binding.qualitySlider.addOnChangeListener { _, value, _ ->
             showQuality(value.toInt())
@@ -162,6 +163,9 @@ class MainActivity : AppCompatActivity() {
         refreshPermissionState()
         // Nothing left to confirm, so the finished-run notification has served its purpose.
         if (!engine.hasPendingDeletion) ConversionService.clearCompletionNotification(this)
+        // In front again, so no consent dialog is over us: one still awaited was dismissed unanswered
+        // (locking the screen does that). Results arrive before onResume, so an answered one is clear.
+        if (engine.hasPendingDeletion) engine.reraiseAbandonedPrompt()
         refreshStorage()
     }
 
@@ -683,6 +687,7 @@ class MainActivity : AppCompatActivity() {
         binding.deleteProtectedButton.isEnabled = !busy
         binding.rangeButton.isEnabled = !busy
         binding.cancelButton.isVisible(state is UiState.Working || state is UiState.AwaitingDeletion)
+        binding.reshowPromptButton.isVisible(state is UiState.AwaitingDeletion)
         binding.progressBar.isVisible(busy)
     }
 

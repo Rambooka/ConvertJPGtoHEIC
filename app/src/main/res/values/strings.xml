@@ -35,6 +35,7 @@
         and videos with an _HEVC copy, both in this range, and songs (MP3, M4A, FLAC) of any date
         with an Opus copy. Each video\'s copy then takes the original\'s name.</string>
     <string name="action_cancel">Cancel</string>
+    <string name="action_reshow_prompt">Show the prompt again</string>
     <string name="action_view">View</string>
     <string name="action_delete">Delete</string>
     <string name="failures_heading">Failed photos</string>
