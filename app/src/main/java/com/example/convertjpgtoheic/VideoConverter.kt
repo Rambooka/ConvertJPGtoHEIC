@@ -155,12 +155,22 @@ class VideoConverter(private val context: Context) {
         if (codec != "hvc1" && codec != "hev1") return "the encoder produced $codec, not HEVC"
         val srcDuration = source.durationSeconds ?: source.video?.durationSeconds
         val outDuration = written.durationSeconds ?: written.video?.durationSeconds
-        if (srcDuration != null && outDuration != null &&
-            abs(srcDuration - outDuration) > maxOf(DURATION_SLACK_SECONDS, srcDuration * DURATION_SLACK_FRACTION)
-        ) {
+        if (srcDuration != null && outDuration != null && !close(srcDuration, outDuration)) {
             return "the new file runs %.1f s, the original %.1f s".format(outDuration, srcDuration)
         }
+        // Each track as well: the movie's length is its longest track's, so a picture cut short
+        // would hide behind sound copied through whole.
+        val srcVideo = source.video?.durationSeconds
+        val outVideo = written.video?.durationSeconds
+        if (srcVideo != null && outVideo != null && !close(srcVideo, outVideo)) {
+            return "the new picture runs %.1f s, the original %.1f s".format(outVideo, srcVideo)
+        }
         if ((source.audio != null) != (written.audio != null)) return "the sound track was not carried across"
+        val srcAudio = source.audio?.durationSeconds
+        val outAudio = written.audio?.durationSeconds
+        if (srcAudio != null && outAudio != null && !close(srcAudio, outAudio)) {
+            return "the new sound runs %.1f s, the original %.1f s".format(outAudio, srcAudio)
+        }
         if (source.video?.rotationDegrees != written.video?.rotationDegrees) {
             return "the orientation changed (${source.video?.rotationDegrees}° → ${written.video?.rotationDegrees}°)"
         }
@@ -168,6 +178,9 @@ class VideoConverter(private val context: Context) {
         if (source.location != null && written.location == null) return "the location would be lost"
         return null
     }
+
+    private fun close(original: Double, copy: Double): Boolean =
+        abs(original - copy) <= maxOf(DURATION_SLACK_SECONDS, original * DURATION_SLACK_FRACTION)
 
     /** Runs Transformer to completion. Returns null on success, else why it failed. */
     private suspend fun encode(uri: Uri, out: File, bitrate: Int, onProgress: (Float) -> Unit): String? {
