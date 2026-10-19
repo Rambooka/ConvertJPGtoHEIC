@@ -88,6 +88,12 @@ data class RunOptions(
     val skipAlreadyConverted: Boolean,
     /** What to do with motion photos — skip them, keep the video, or drop it. */
     val motionPolicy: MotionPhotoPolicy,
+    /**
+     * Measure only: encode everything as usual, count what would be saved, then throw each copy
+     * away. Nothing is published and nothing deleted. Photos run as [RunMode.DRY_RUN]; videos and
+     * music take this flag.
+     */
+    val dryRun: Boolean = false,
 )
 
 data class RunProgress(
@@ -257,6 +263,8 @@ data class RunReport(
     val musicYearsFixed: Int = 0,
     /** Music repair runs only: no year anywhere in the tags to give them. */
     val musicNoDate: Int = 0,
+    /** A measuring run: the tallies say what a real run would do, and nothing was changed. */
+    val dryRun: Boolean = false,
     /** Clean-up runs only: leftovers found, by kind; [deletedOriginals] is how many went. */
     val leftoverJpgs: Int = 0,
     val leftoverMp3s: Int = 0,
@@ -1101,7 +1109,7 @@ class ConversionEngine private constructor(context: Context) {
         videoStaging.listFiles()?.forEach { it.delete() }
 
         var tally = RunReport(mode)
-        val deleteAsWeGo = options.deleteOriginals
+        val deleteAsWeGo = options.deleteOriginals && !options.dryRun
         /** Converted but not yet offered for deletion: original URI → (new URI, original name). */
         val waiting = LinkedHashMap<Uri, Pair<Uri, String>>()
         var deletedTotal = 0
@@ -1175,6 +1183,7 @@ class ConversionEngine private constructor(context: Context) {
 
         _state.value = UiState.Finished(
             tally.copy(
+                dryRun = options.dryRun,
                 cancelled = cancelRequested,
                 deletedOriginals = deletedTotal,
                 deletionOutcome = when {
@@ -1185,6 +1194,13 @@ class ConversionEngine private constructor(context: Context) {
             )
         )
     }
+
+    /** A dry run's tally for a copy that would have been kept: counted, never published. */
+    private fun countMeasured(tally: RunReport, originalBytes: Long, outputBytes: Long): RunReport = tally.copy(
+        converted = tally.converted + 1,
+        originalBytes = tally.originalBytes + originalBytes,
+        heicBytes = tally.heicBytes + outputBytes,
+    )
 
     private suspend fun convertOneVideo(
         options: RunOptions,
@@ -1216,6 +1232,7 @@ class ConversionEngine private constructor(context: Context) {
             if (options.onlyIfSmaller && bytes >= video.sizeBytes) {
                 return tally.copy(skippedNotSmaller = tally.skippedNotSmaller + 1)
             }
+            if (options.dryRun) return countMeasured(tally, video.sizeBytes, bytes)
             val published = repository.publishVideo(video, staged)
                 ?: return tally.withFailure(video.uri, video.displayName, video.sizeBytes, "could not be saved to the gallery")
             if (options.deleteOriginals) waiting[video.uri] = published to video.displayName
@@ -1257,7 +1274,7 @@ class ConversionEngine private constructor(context: Context) {
         musicStaging.listFiles()?.forEach { it.delete() }
 
         var tally = RunReport(mode, musicRenamed = renamed)
-        val deleteAsWeGo = options.deleteOriginals
+        val deleteAsWeGo = options.deleteOriginals && !options.dryRun
         val waiting = ArrayList<Uri>()
         var deletedTotal = 0
         var declined = false
@@ -1314,6 +1331,7 @@ class ConversionEngine private constructor(context: Context) {
 
         _state.value = UiState.Finished(
             tally.copy(
+                dryRun = options.dryRun,
                 cancelled = cancelRequested,
                 deletedOriginals = deletedTotal,
                 deletionOutcome = when {
@@ -1351,6 +1369,7 @@ class ConversionEngine private constructor(context: Context) {
             }
             // Always, whatever the photo option says: a bigger copy would defeat the purpose.
             if (bytes >= track.sizeBytes) return tally.copy(musicNotSmaller = tally.musicNotSmaller + 1)
+            if (options.dryRun) return countMeasured(tally, track.sizeBytes, bytes)
             repository.publishOpus(track, staged)
                 ?: return tally.withFailure(track.uri, track.displayName, track.sizeBytes, "could not be saved to the music library")
             if (options.deleteOriginals) waiting += track.uri

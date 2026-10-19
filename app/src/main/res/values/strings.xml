@@ -24,9 +24,10 @@
 
     <string name="opt_delete_originals">Delete originals after converting</string>
 
-    <string name="action_dry_run">Dry run</string>
-    <string name="action_dry_run_hint">Converts in memory to measure the real saving. Nothing is
-        added to your gallery and no original is deleted.</string>
+    <string name="opt_dry_run">Dry run: measure only, change nothing</string>
+    <string name="opt_dry_run_hint">Pictures, videos and music are converted to measure the real
+        saving, then thrown away. Nothing is added and nothing deleted. Takes as long as a real run.
+        Off again each time the app opens.</string>
     <string name="action_convert">Convert pictures to HEIC</string>
     <string name="action_cleanup">Clean up leftovers</string>
     <string name="action_cleanup_hint">Finds JPGs and PNGs in this range that already have a HEIC beside

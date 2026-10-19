@@ -168,8 +168,10 @@ class ConversionService : Service() {
             report.mode == RunMode.MUSIC_REPAIR && report.cancelled -> "Music repair cancelled"
             report.mode == RunMode.MUSIC_REPAIR -> "Repaired music: ${report.musicYearsFixed} years added"
             report.mode == RunMode.VIDEO && report.cancelled -> "Video conversion cancelled"
+            report.mode == RunMode.VIDEO && report.dryRun -> "Dry run: ${report.converted} videos would convert"
             report.mode == RunMode.VIDEO -> "Converted ${report.converted} videos"
             report.mode == RunMode.MUSIC && report.cancelled -> "Music conversion cancelled"
+            report.mode == RunMode.MUSIC && report.dryRun -> "Dry run: ${report.converted} songs would convert"
             report.mode == RunMode.MUSIC -> "Converted ${report.converted} songs"
 
             report.failureCount > 0 && report.converted == 0 -> "Nothing converted — tap for details"
@@ -328,6 +330,7 @@ class ConversionService : Service() {
         private const val EXTRA_START = "start_ms"
         private const val EXTRA_END = "end_ms"
         private const val EXTRA_QUALITY = "quality"
+        private const val EXTRA_DRY_RUN = "dryRun"
         private const val EXTRA_DELETE = "delete"
         private const val EXTRA_ONLY_SMALLER = "only_smaller"
         private const val EXTRA_SKIP_SMALL = "skip_small"
@@ -361,6 +364,7 @@ class ConversionService : Service() {
                 .putExtra(EXTRA_SHRINK_OVERSIZED, options.shrinkOversized)
                 .putExtra(EXTRA_SKIP_EXISTING, options.skipAlreadyConverted)
                 .putExtra(EXTRA_MOTION_POLICY, options.motionPolicy.name)
+                .putExtra(EXTRA_DRY_RUN, options.dryRun)
             ContextCompat.startForegroundService(context, intent)
         }
 
@@ -376,6 +380,7 @@ class ConversionService : Service() {
             motionPolicy = runCatching {
                 MotionPhotoPolicy.valueOf(getStringExtra(EXTRA_MOTION_POLICY) ?: "")
             }.getOrDefault(MotionPhotoPolicy.KEEP_VIDEO),
+            dryRun = getBooleanExtra(EXTRA_DRY_RUN, false),
         )
     }
 }

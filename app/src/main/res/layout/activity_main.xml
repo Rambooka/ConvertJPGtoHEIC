@@ -178,27 +178,29 @@
             android:checked="true"
             android:text="@string/opt_delete_originals" />
 
-        <!-- Actions -->
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/dryRunButton"
-            style="@style/Widget.Material3.Button.TonalButton"
+        <!-- Not restored from settings: left on, it would make every run quietly do nothing. -->
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/switchDryRun"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
-            android:text="@string/action_dry_run" />
+            android:layout_marginTop="8dp"
+            android:checked="false"
+            android:saveEnabled="false"
+            android:text="@string/opt_dry_run" />
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="@string/action_dry_run_hint"
+            android:layout_marginStart="4dp"
+            android:text="@string/opt_dry_run_hint"
             android:textAppearance="?attr/textAppearanceBodySmall" />
 
+        <!-- Actions -->
         <com.google.android.material.button.MaterialButton
             android:id="@+id/convertButton"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="24dp"
             android:text="@string/action_convert" />
 
         <com.google.android.material.button.MaterialButton

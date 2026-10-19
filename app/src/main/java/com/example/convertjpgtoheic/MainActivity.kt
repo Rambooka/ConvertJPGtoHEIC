@@ -115,8 +115,10 @@ class MainActivity : AppCompatActivity() {
         restoreSettings()
 
         binding.rangeButton.setOnClickListener { showRangePicker() }
-        binding.dryRunButton.setOnClickListener { startRun(RunMode.DRY_RUN) }
-        binding.convertButton.setOnClickListener { confirmThenConvert() }
+        // Dry run measures and changes nothing, so it needs none of the warnings below.
+        binding.convertButton.setOnClickListener {
+            if (binding.switchDryRun.isChecked) startRun(RunMode.DRY_RUN) else confirmThenConvert()
+        }
         binding.cleanupButton.setOnClickListener { confirmThenCleanUp() }
         binding.repairButton.setOnClickListener { confirmThenRepair() }
         binding.videoButton.setOnClickListener { confirmThenConvertVideos() }
@@ -425,12 +427,14 @@ class MainActivity : AppCompatActivity() {
         startMs = current.startMs,
         endMs = current.endMs,
         quality = binding.qualitySlider.value.toInt(),
-        deleteOriginals = binding.switchDelete.isChecked,
+        // A dry run deletes nothing, whatever the switch says.
+        deleteOriginals = binding.switchDelete.isChecked && !binding.switchDryRun.isChecked,
         onlyIfSmaller = binding.switchOnlySmaller.isChecked,
         skipSmall = binding.switchSkipSmall.isChecked,
         shrinkOversized = binding.switchShrinkOversized.isChecked,
         skipAlreadyConverted = binding.switchSkipExisting.isChecked,
         motionPolicy = selectedMotionPolicy(),
+        dryRun = binding.switchDryRun.isChecked,
     )
 
     /**
@@ -558,6 +562,10 @@ class MainActivity : AppCompatActivity() {
             permissionLauncher.launch(arrayOf(readVideoPermission()))
             return
         }
+        if (binding.switchDryRun.isChecked) {
+            startRun(RunMode.VIDEO)
+            return
+        }
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.videos_title)
             .setMessage(R.string.videos_message)
@@ -579,6 +587,10 @@ class MainActivity : AppCompatActivity() {
         if (!granted(readAudioPermission())) {
             binding.statusText.setText(R.string.music_need_permission)
             permissionLauncher.launch(arrayOf(readAudioPermission()))
+            return
+        }
+        if (binding.switchDryRun.isChecked) {
+            startRun(RunMode.MUSIC)
             return
         }
         MaterialAlertDialogBuilder(this)
@@ -661,7 +673,6 @@ class MainActivity : AppCompatActivity() {
         val busy = state is UiState.Scanning || state is UiState.Working ||
             state is UiState.AwaitingDeletion
         val usable = granted(readImagePermission()) && !busy
-        binding.dryRunButton.isEnabled = usable && EncoderSupport.hasHevcEncoder
         binding.convertButton.isEnabled = usable && EncoderSupport.hasHevcEncoder
         binding.cleanupButton.isEnabled = usable
         binding.repairButton.isEnabled = usable
@@ -759,6 +770,7 @@ class MainActivity : AppCompatActivity() {
             RunMode.MUSIC -> "Music conversion"
         }
         appendLine(if (report.cancelled) "$label cancelled — partial results below." else "$label complete.")
+        if (report.dryRun) appendLine("Dry run: nothing was saved or deleted. These are what a real run would do.")
         appendLine()
 
         if (report.mode == RunMode.CLEAN_UP) {
