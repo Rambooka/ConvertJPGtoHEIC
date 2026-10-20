@@ -107,10 +107,14 @@ c. **Consent prompts still need a person**, but a dismissed one is no longer los
 d. **MediaProvider rarely rescans a same-length rewrite** — why both repairs end with an explicit
    rescan step. A rewrite that grows the file is mostly picked up on close.
 
-e. **Music is slow, and much slower with the screen off.** `DefaultDispatch` (our Kotlin
-   `Resampler` and PCM copying) is the bottleneck: ~3.5× real time on the big cores. Screen off,
-   Samsung moves the app to cgroup `cpu:/background`, cpuset `/moderate` (cores 0–2): 7–17 min a
-   song. Speeding up `Resampler` (both channels per tap pass, fewer allocations) is the lever.
+e. **Music speed — settled 20 Oct.** The resampler was *not* the bottleneck (JVM benchmark:
+   ~200× real time; `ResamplerBenchmark`, `RESAMPLER_BENCH=1`). The per-song log line now times
+   each stage: the thread spends its time in codec hand-overs — ~1.5 ms each, ~23,000 a song
+   (one per MP3 frame in, per decoded buffer out, per Opus packet out) — with idle nil. So songs
+   are encoded six at a time (`MUSIC_WORKERS`) and the Opus encoder is asked for 1 s input
+   buffers (AOSP `C2SoftOpusEnc` still emits one packet per frame): 5 songs in 76 s against
+   ~200 s serially, 2.6×. Beyond that the codec service itself is the limit (hand-overs slow as
+   workers rise). Screen off still confines the app to cores 0–2; "Keep the screen on" covers it.
 
 f. **"Not smaller" songs are re-encoded on every music run** — nothing remembers them.
 
