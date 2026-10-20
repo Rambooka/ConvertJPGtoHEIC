@@ -296,6 +296,12 @@ class MusicConverter(private val context: Context) {
                 val format48 = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, OPUS_RATE, ch).apply {
                     setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
                     setInteger(MediaFormat.KEY_COMPLEXITY, OPUS_COMPLEXITY)
+                    // Each hand-over to the encoder is a round trip to its process, ~1.5 ms, and
+                    // its default input buffer holds one 20 ms frame: 9,000 trips a song. Asking
+                    // for bigger buffers lets each trip carry many frames; the encoder (AOSP
+                    // C2SoftOpusEnc) still emits every frame as its own packet, which the Ogg
+                    // writer needs.
+                    setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, ENCODER_INPUT_SECONDS * OPUS_RATE * ch * 2)
                 }
                 val enc = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS).also { encoder = it }
                 enc.configure(format48, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
@@ -689,6 +695,9 @@ class MusicConverter(private val context: Context) {
 
         private const val OPUS_RATE = 48_000
         private const val OPUS_COMPLEXITY = 10
+
+        /** Audio per encoder input buffer, if the codec honours the request. */
+        private const val ENCODER_INPUT_SECONDS = 1
 
         private const val BITRATE_SHARE = 0.75
         private const val MIN_BITRATE = 64_000

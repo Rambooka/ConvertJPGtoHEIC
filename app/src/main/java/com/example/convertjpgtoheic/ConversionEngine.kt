@@ -1452,9 +1452,13 @@ class ConversionEngine private constructor(context: Context) {
         )
     }
 
-    /** How many songs to encode at once: up to [MUSIC_WORKERS], never more than half the cores. */
+    /**
+     * How many songs to encode at once. A song's thread spends most of its time waiting on the
+     * codec hand-overs (each is a round trip to the codec's process, ~1.5 ms, tens of thousands a
+     * song), not computing, so the count is set by cores with a margin, not by half of them.
+     */
     private fun musicWorkers(): Int =
-        minOf(MUSIC_WORKERS, Runtime.getRuntime().availableProcessors() / 2).coerceAtLeast(1)
+        minOf(MUSIC_WORKERS, Runtime.getRuntime().availableProcessors() - 2).coerceAtLeast(1)
 
     /** What became of one song's encode, before anything shared is touched. */
     private sealed interface TrackOutcome {
@@ -2063,8 +2067,8 @@ class ConversionEngine private constructor(context: Context) {
         /** Songs to convert before stopping to have their MP3s removed. */
         private const val MUSIC_DELETE_EVERY = 100
 
-        /** Songs encoded at once, cores allowing: the pipeline is single-threaded per song. */
-        private const val MUSIC_WORKERS = 3
+        /** Songs encoded at once, cores allowing: each is latency-bound, so this is well above the core count would suggest. */
+        private const val MUSIC_WORKERS = 6
 
         private const val MB = 1024L * 1024
 
