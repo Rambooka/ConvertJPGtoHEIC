@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.widget.EditText
 import android.os.Bundle
 import android.util.Log
 import android.util.Size
@@ -37,6 +38,9 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
 import java.util.Date
+
+/** As much of a log as a dialog can show; the share sends the whole file. */
+private const val MAX_LOG_CHARS = 60_000
 
 class MainActivity : AppCompatActivity() {
 
@@ -115,19 +119,32 @@ class MainActivity : AppCompatActivity() {
         restoreSettings()
 
         binding.rangeButton.setOnClickListener { showRangePicker() }
-        binding.dryRunButton.setOnClickListener { startRun(RunMode.DRY_RUN) }
-        binding.convertButton.setOnClickListener { confirmThenConvert() }
+        // Dry run measures and changes nothing, so it needs none of the warnings below.
+        binding.convertButton.setOnClickListener {
+            if (binding.switchDryRun.isChecked) startRun(RunMode.DRY_RUN) else confirmThenConvert()
+        }
         binding.cleanupButton.setOnClickListener { confirmThenCleanUp() }
         binding.repairButton.setOnClickListener { confirmThenRepair() }
         binding.videoButton.setOnClickListener { confirmThenConvertVideos() }
         binding.musicButton.setOnClickListener { confirmThenConvertMusic() }
+        binding.musicRepairButton.setOnClickListener { confirmThenRepairMusic() }
+        binding.deleteProtectedButton.setOnClickListener { confirmThenDeleteProtected() }
         binding.cancelButton.setOnClickListener { engine.cancel() }
+        binding.reshowPromptButton.setOnClickListener { engine.reraiseAbandonedPrompt(force = true) }
 
         binding.qualitySlider.addOnChangeListener { _, value, _ ->
             showQuality(value.toInt())
             settings.quality = value.toInt()
         }
         binding.switchDelete.setOnCheckedChangeListener { _, on -> settings.deleteOriginals = on }
+        binding.switchTrash.setOnCheckedChangeListener { _, on -> settings.trashInstead = on }
+        binding.switchKeepScreenOn.setOnCheckedChangeListener { _, on ->
+            settings.keepScreenOn = on
+            updateButtons(engine.state.value)
+        }
+        binding.switchOnlyCharging.setOnCheckedChangeListener { _, on -> settings.onlyWhileCharging = on }
+        binding.excludeFoldersButton.setOnClickListener { editExcludedFolders() }
+        binding.viewLogButton.setOnClickListener { showLastLog() }
         binding.switchOnlySmaller.setOnCheckedChangeListener { _, on -> settings.onlyIfSmaller = on }
         binding.switchSkipSmall.setOnCheckedChangeListener { _, on -> settings.skipSmall = on }
         binding.switchShrinkOversized.setOnCheckedChangeListener { _, on -> settings.shrinkOversized = on }
@@ -158,6 +175,9 @@ class MainActivity : AppCompatActivity() {
         refreshPermissionState()
         // Nothing left to confirm, so the finished-run notification has served its purpose.
         if (!engine.hasPendingDeletion) ConversionService.clearCompletionNotification(this)
+        // In front again, so no consent dialog is over us: one still awaited was dismissed unanswered
+        // (locking the screen does that). Results arrive before onResume, so an answered one is clear.
+        if (engine.hasPendingDeletion) engine.reraiseAbandonedPrompt()
         refreshStorage()
     }
 
@@ -165,6 +185,10 @@ class MainActivity : AppCompatActivity() {
         binding.qualitySlider.value = settings.quality.toFloat()
         showQuality(settings.quality)
         binding.switchDelete.isChecked = settings.deleteOriginals
+        binding.switchTrash.isChecked = settings.trashInstead
+        binding.switchKeepScreenOn.isChecked = settings.keepScreenOn
+        binding.switchOnlyCharging.isChecked = settings.onlyWhileCharging
+        showExcludedFolders()
         binding.switchOnlySmaller.isChecked = settings.onlyIfSmaller
         binding.switchSkipSmall.isChecked = settings.skipSmall
         binding.switchShrinkOversized.isChecked = settings.shrinkOversized
@@ -172,6 +196,54 @@ class MainActivity : AppCompatActivity() {
         checkMotionPolicy(settings.motionPolicy)
         range = settings.range
         showRange()
+    }
+
+    private fun showExcludedFolders() {
+        binding.excludeFoldersHint.text = getString(R.string.exclude_hint, settings.excludedFolders.joinToString("  "))
+    }
+
+    /** The folders every run leaves alone, one per line; a change rescans the range. */
+    private fun editExcludedFolders() {
+        val input = EditText(this).apply {
+            setText(settings.excludedFolders.joinToString("\n"))
+            hint = getString(R.string.exclude_example)
+            minLines = 3
+            setSingleLine(false)
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.exclude_title)
+            .setMessage(R.string.exclude_message)
+            .setView(input)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                settings.excludedFolders = input.text.toString().lines()
+                showExcludedFolders()
+                range?.takeIf { it.isValid }?.let { engine.scan(it) }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /** The last run's log, with a way to send it on. */
+    private fun showLastLog() {
+        val file = RunLog.latest(this)
+        if (file == null) {
+            binding.statusText.setText(R.string.log_none)
+            return
+        }
+        val whole = runCatching { file.readText() }.getOrDefault("")
+        val text = if (whole.length > MAX_LOG_CHARS) "…" + whole.takeLast(MAX_LOG_CHARS) else whole
+        MaterialAlertDialogBuilder(this)
+            .setTitle(file.name)
+            .setMessage(text)
+            .setPositiveButton(R.string.log_share) { _, _ ->
+                val send = Intent(Intent.ACTION_SEND)
+                    .setType("text/plain")
+                    .putExtra(Intent.EXTRA_SUBJECT, file.name)
+                    .putExtra(Intent.EXTRA_TEXT, whole)
+                startActivity(Intent.createChooser(send, null))
+            }
+            .setNegativeButton(R.string.log_close, null)
+            .show()
     }
 
     private fun selectedMotionPolicy(): MotionPhotoPolicy =
@@ -335,6 +407,21 @@ class MainActivity : AppCompatActivity() {
         append(etaText(p.remainingMs))
     }
 
+    private fun musicRepairStatus(p: RunProgress): String = buildString {
+        appendLine(
+            when (p.repairPhase) {
+                RepairPhase.REFRESHING -> getString(R.string.progress_music_repair_refreshing, p.done, p.total)
+                RepairPhase.WRITING ->
+                    getString(R.string.progress_music_repair_writing, p.done + 1, p.total, p.currentName, p.repairedDates)
+                else -> getString(
+                    R.string.progress_music_repair_checking,
+                    p.done + 1, p.total, p.currentName, p.repairedDates, p.awaitingPermission,
+                )
+            }
+        )
+        append(etaText(p.remainingMs))
+    }
+
     /** "About 12 min left · done around 6:40 pm", in the phone's own 12/24-hour style. */
     private fun etaText(remainingMs: Long?): String {
         if (remainingMs == null) return getString(R.string.eta_estimating)
@@ -408,12 +495,16 @@ class MainActivity : AppCompatActivity() {
         startMs = current.startMs,
         endMs = current.endMs,
         quality = binding.qualitySlider.value.toInt(),
-        deleteOriginals = binding.switchDelete.isChecked,
+        // A dry run deletes nothing, whatever the switch says.
+        deleteOriginals = binding.switchDelete.isChecked && !binding.switchDryRun.isChecked,
         onlyIfSmaller = binding.switchOnlySmaller.isChecked,
         skipSmall = binding.switchSkipSmall.isChecked,
         shrinkOversized = binding.switchShrinkOversized.isChecked,
         skipAlreadyConverted = binding.switchSkipExisting.isChecked,
         motionPolicy = selectedMotionPolicy(),
+        dryRun = binding.switchDryRun.isChecked,
+        trashOriginals = binding.switchTrash.isChecked,
+        onlyWhileCharging = binding.switchOnlyCharging.isChecked,
     )
 
     /**
@@ -423,7 +514,13 @@ class MainActivity : AppCompatActivity() {
     private fun startRun(mode: RunMode) {
         // A repair and a music run cover the whole library, so they are the runs that need no range.
         val current = range?.takeIf { it.isValid }
-            ?: if (mode == RunMode.REPAIR || mode == RunMode.MUSIC) DateRange(0L, Long.MAX_VALUE) else null
+            ?: if (mode == RunMode.REPAIR || mode == RunMode.MUSIC || mode == RunMode.MUSIC_REPAIR ||
+                mode == RunMode.DELETE_PROTECTED
+            ) {
+                DateRange(0L, Long.MAX_VALUE)
+            } else {
+                null
+            }
         if (current == null) {
             binding.statusText.setText(R.string.pick_range_first)
             return
@@ -535,6 +632,10 @@ class MainActivity : AppCompatActivity() {
             permissionLauncher.launch(arrayOf(readVideoPermission()))
             return
         }
+        if (binding.switchDryRun.isChecked) {
+            startRun(RunMode.VIDEO)
+            return
+        }
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.videos_title)
             .setMessage(R.string.videos_message)
@@ -558,6 +659,10 @@ class MainActivity : AppCompatActivity() {
             permissionLauncher.launch(arrayOf(readAudioPermission()))
             return
         }
+        if (binding.switchDryRun.isChecked) {
+            startRun(RunMode.MUSIC)
+            return
+        }
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.music_title)
             .setMessage(
@@ -566,6 +671,35 @@ class MainActivity : AppCompatActivity() {
                 )
             )
             .setPositiveButton(R.string.music_button) { _, _ -> startRun(RunMode.MUSIC) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /** Repairs the tags of every converted song; like the music run, the range does not apply. */
+    private fun confirmThenRepairMusic() {
+        if (!granted(readAudioPermission())) {
+            binding.statusText.setText(R.string.music_need_permission)
+            permissionLauncher.launch(arrayOf(readAudioPermission()))
+            return
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.music_repair_title)
+            .setMessage(R.string.music_repair_message)
+            .setPositiveButton(R.string.action_repair_button) { _, _ -> startRun(RunMode.MUSIC_REPAIR) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun confirmThenDeleteProtected() {
+        if (!granted(readAudioPermission())) {
+            binding.statusText.setText(R.string.music_need_permission)
+            permissionLauncher.launch(arrayOf(readAudioPermission()))
+            return
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.delete_protected_title)
+            .setMessage(R.string.delete_protected_message)
+            .setPositiveButton(android.R.string.ok) { _, _ -> startRun(RunMode.DELETE_PROTECTED) }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
     }
@@ -609,15 +743,19 @@ class MainActivity : AppCompatActivity() {
         val busy = state is UiState.Scanning || state is UiState.Working ||
             state is UiState.AwaitingDeletion
         val usable = granted(readImagePermission()) && !busy
-        binding.dryRunButton.isEnabled = usable && EncoderSupport.hasHevcEncoder
         binding.convertButton.isEnabled = usable && EncoderSupport.hasHevcEncoder
         binding.cleanupButton.isEnabled = usable
         binding.repairButton.isEnabled = usable
         binding.videoButton.isEnabled = usable && EncoderSupport.hasHevcEncoder
         // Music needs neither photo access nor a range, only its own permission (asked on tap).
         binding.musicButton.isEnabled = !busy && EncoderSupport.hasOpusEncoder
+        binding.musicRepairButton.isEnabled = !busy
+        binding.deleteProtectedButton.isEnabled = !busy
         binding.rangeButton.isEnabled = !busy
         binding.cancelButton.isVisible(state is UiState.Working || state is UiState.AwaitingDeletion)
+        binding.reshowPromptButton.isVisible(state is UiState.AwaitingDeletion)
+        // Screen off, Samsung confines the app to the slow cores — a song then takes ten times as long.
+        binding.root.keepScreenOn = busy && settings.keepScreenOn
         binding.progressBar.isVisible(busy)
     }
 
@@ -652,14 +790,16 @@ class MainActivity : AppCompatActivity() {
                 binding.progressBar.isIndeterminate = false
                 binding.progressBar.max = state.progress.total
                 binding.progressBar.setProgressCompat(state.progress.done, true)
-                binding.statusText.text = when (state.mode) {
-                    RunMode.CLEAN_UP -> getString(R.string.progress_cleanup)
+                val text = when (state.mode) {
+                    RunMode.CLEAN_UP, RunMode.DELETE_PROTECTED -> getString(R.string.progress_cleanup)
                     RunMode.REPAIR -> repairStatus(state.progress)
+                    RunMode.MUSIC_REPAIR -> musicRepairStatus(state.progress)
                     RunMode.VIDEO -> videoStatus(state.progress)
                     RunMode.MUSIC -> musicStatus(state.progress)
                     RunMode.DRY_RUN -> runningStatus(state.progress, R.string.progress_measuring)
                     RunMode.CONVERT -> runningStatus(state.progress, R.string.progress_converting)
                 }
+                binding.statusText.text = state.progress.pausedReason?.let { "Paused — $it.\n\n$text" } ?: text
             }
 
             is UiState.AwaitingDeletion -> {
@@ -669,8 +809,10 @@ class MainActivity : AppCompatActivity() {
                 binding.statusText.text = resources.getQuantityString(
                     when {
                         state.mode == RunMode.REPAIR -> R.plurals.awaiting_repair_access
+                        state.mode == RunMode.MUSIC_REPAIR -> R.plurals.awaiting_music_repair_access
                         state.mode == RunMode.VIDEO -> R.plurals.awaiting_video_deletion
-                        state.mode == RunMode.MUSIC -> R.plurals.awaiting_music_deletion
+                        state.mode == RunMode.MUSIC || state.mode == RunMode.DELETE_PROTECTED ->
+                            R.plurals.awaiting_music_deletion
                         state.lowOnSpace -> R.plurals.awaiting_deletion_low_space
                         else -> R.plurals.awaiting_deletion
                     },
@@ -696,10 +838,16 @@ class MainActivity : AppCompatActivity() {
             RunMode.CONVERT -> "Conversion"
             RunMode.CLEAN_UP -> "Clean-up"
             RunMode.REPAIR -> "Repair"
+            RunMode.MUSIC_REPAIR -> "Music repair"
+            RunMode.DELETE_PROTECTED -> "Copy-protected songs"
             RunMode.VIDEO -> "Video conversion"
             RunMode.MUSIC -> "Music conversion"
         }
         appendLine(if (report.cancelled) "$label cancelled — partial results below." else "$label complete.")
+        if (report.dryRun) appendLine("Dry run: nothing was saved or deleted. These are what a real run would do.")
+        if (report.trashed) {
+            appendLine("The originals went to the trash, not to deletion: they can be restored from the gallery's trash for 30 days, and the space comes back when it empties.")
+        }
         appendLine()
 
         if (report.mode == RunMode.CLEAN_UP) {
@@ -708,6 +856,14 @@ class MainActivity : AppCompatActivity() {
         }
         if (report.mode == RunMode.REPAIR) {
             describeRepair(report)
+            return@buildString
+        }
+        if (report.mode == RunMode.DELETE_PROTECTED) {
+            describeProtected(report)
+            return@buildString
+        }
+        if (report.mode == RunMode.MUSIC_REPAIR) {
+            describeMusicRepair(report)
             return@buildString
         }
         if (report.mode == RunMode.VIDEO) {
@@ -772,6 +928,9 @@ class MainActivity : AppCompatActivity() {
             appendLine("Skipped, a file of that name exists: ${report.renamedOutput}")
         }
         if (report.relocated > 0) appendLine("Saved under Pictures/ instead: ${report.relocated}")
+        if (report.flattenedTransparency > 0) {
+            appendLine("Transparent areas filled white: ${report.flattenedTransparency} (PNGs; HEIC keeps no transparency here)")
+        }
         if (report.dateWriteFailed > 0) {
             appendLine("Date could not be set on: ${report.dateWriteFailed} (EXIF still has it)")
         }
@@ -855,19 +1014,19 @@ class MainActivity : AppCompatActivity() {
             appendLine("No songs were converted.")
         } else {
             appendLine("Songs converted:   ${report.converted}")
-            appendLine("MP3 size:          ${formatSize(report.originalBytes)}")
+            appendLine("Original size:     ${formatSize(report.originalBytes)}")
             appendLine("Opus size:         ${formatSize(report.heicBytes)}")
             appendLine("Space saved:       ${formatSize(report.savedBytes)} (${report.savedPercent}%)")
         }
         if (report.musicRenamed > 0) appendLine("Renamed .ogg → .opus: ${report.musicRenamed}")
-        if (report.musicNotSmaller > 0) appendLine("Not smaller:       ${report.musicNotSmaller} (kept the MP3)")
+        if (report.musicNotSmaller > 0) appendLine("Not smaller:       ${report.musicNotSmaller} (kept the original)")
         if (report.skippedExisting > 0) appendLine("Already converted: ${report.skippedExisting}")
         when (report.deletionOutcome) {
-            DeletionOutcome.COMPLETED -> appendLine("MP3s deleted:      ${report.deletedOriginals}")
+            DeletionOutcome.COMPLETED -> appendLine("Originals deleted: ${report.deletedOriginals}")
             DeletionOutcome.DECLINED -> appendLine(
-                "MP3s kept:         deletion was declined (${report.deletedOriginals} deleted before that)"
+                "Originals kept:    deletion was declined (${report.deletedOriginals} deleted before that)"
             )
-            else -> if (report.converted > 0) appendLine("The MP3s were kept.")
+            else -> if (report.converted > 0) appendLine("The originals were kept.")
         }
     }
 
@@ -889,6 +1048,34 @@ class MainActivity : AppCompatActivity() {
             )
         )
         append(etaText(p.remainingMs))
+    }
+
+    private fun StringBuilder.describeProtected(report: RunReport) {
+        if (report.protectedFound == 0) {
+            appendLine(if (report.cancelled) "Stopped before the search finished." else "No copy-protected (.m4p) songs found.")
+            return
+        }
+        appendLine("Found:             ${report.protectedFound} (${formatSize(report.originalBytes)})")
+        when (report.deletionOutcome) {
+            DeletionOutcome.COMPLETED -> appendLine("Deleted:           ${report.deletedOriginals}")
+            else -> appendLine("Deletion was declined; nothing was removed.")
+        }
+    }
+
+    private fun StringBuilder.describeMusicRepair(report: RunReport) {
+        appendLine("Songs checked:     ${report.repairChecked}")
+        appendLine("Years added:       ${report.musicYearsFixed}")
+        if (report.musicNoDate > 0) appendLine("No date in tags:   ${report.musicNoDate} (nothing to take a year from)")
+        if (report.repairDeclined > 0) appendLine("Not allowed:       ${report.repairDeclined} (left as they were)")
+        if (report.repairUnverified > 0) {
+            appendLine("Not yet showing:   ${report.repairUnverified} (rewritten; music apps may catch up after a rescan)")
+        }
+        if (report.musicYearsFixed == 0 && report.repairUnverified == 0 && report.failureCount == 0 &&
+            report.repairDeclined == 0 && !report.cancelled
+        ) {
+            appendLine()
+            appendLine("Nothing needed fixing.")
+        }
     }
 
     private fun StringBuilder.describeRepair(report: RunReport) {
@@ -922,14 +1109,15 @@ class MainActivity : AppCompatActivity() {
                 if (report.cancelled) {
                     appendLine("Stopped before the search finished.")
                 } else {
-                    appendLine("No leftover originals found in this range.")
+                    appendLine("No leftover originals found (pictures and videos in this range, or songs).")
                 }
 
             DeletionOutcome.PENDING ->
                 appendLine("Waiting for you to confirm deletion…")
 
             DeletionOutcome.COMPLETED -> {
-                appendLine("Deleted ${report.deletedOriginals} leftover JPGs.")
+                appendLine("Deleted ${report.deletedOriginals} leftover originals.")
+                appendLine("Found:     ${report.leftoverJpgs} pictures, ${report.leftoverVideos} videos, ${report.leftoverMp3s} songs")
                 appendLine("Reclaimed: ${formatSize(report.originalBytes)}")
             }
 

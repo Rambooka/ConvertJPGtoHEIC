@@ -86,6 +86,16 @@ data class HeicRow(
     val path: String?,
 )
 
+/** A song in the music library, as the music repair and the copy-protected deletion need it. */
+data class OpusRow(
+    val uri: Uri,
+    val id: Long,
+    val displayName: String,
+    val sizeBytes: Long,
+    /** Filesystem path, used only to ask the scanner to re-read the file. */
+    val path: String?,
+)
+
 /** What MediaStore currently says about a file's date and orientation. */
 data class CaptureState(val dateTakenMs: Long?, val orientation: Int)
 
@@ -126,17 +136,20 @@ internal object JpgQuery {
     private val TAKEN = MediaStore.Images.Media.DATE_TAKEN
     private val MODIFIED = MediaStore.Images.Media.DATE_MODIFIED
 
-    val selection: String =
-        "($MIME = ? OR $MIME = ?) AND " +
+    fun selection(excludedFolders: List<String>): String =
+        "$MIME IN (?, ?, ?) AND " +
             "(($TAKEN IS NOT NULL AND $TAKEN > 0 AND $TAKEN BETWEEN ? AND ?) OR " +
-            "(($TAKEN IS NULL OR $TAKEN <= 0) AND $MODIFIED BETWEEN ? AND ?))"
+            "(($TAKEN IS NULL OR $TAKEN <= 0) AND $MODIFIED BETWEEN ? AND ?))" +
+            FolderExclusion.sql(MediaStore.Images.Media.RELATIVE_PATH, excludedFolders)
 
-    fun args(startMs: Long, endMs: Long): Array<String> = arrayOf(
-        "image/jpeg", "image/jpg",
+    fun args(startMs: Long, endMs: Long, excludedFolders: List<String>): Array<String> = arrayOf(
+        // PNG too: BitmapFactory decodes it the same way, and with no EXIF of its own it gets the
+        // date-only block a bare JPG does.
+        "image/jpeg", "image/jpg", "image/png",
         startMs.toString(), endMs.toString(),
         // DATE_MODIFIED is stored in seconds, DATE_TAKEN in milliseconds.
         (startMs / 1000).toString(), (endMs / 1000).toString(),
-    )
+    ) + FolderExclusion.args(excludedFolders)
 
     /**
      * The capture date to stamp on the HEIC. Falls back to DATE_MODIFIED whenever DATE_TAKEN is
@@ -144,6 +157,18 @@ internal object JpgQuery {
      */
     fun effectiveDateMs(dateTakenMs: Long?, dateModifiedSec: Long): Long =
         if (dateTakenMs != null && dateTakenMs > 0) dateTakenMs else dateModifiedSec * 1000
+}
+
+/**
+ * The `AND path NOT LIKE ?` clauses that keep [Settings.excludedFolders] out of a query. Each
+ * prefix is escaped, so a folder with `_` or `%` in its name matches only itself.
+ */
+internal object FolderExclusion {
+    fun sql(column: String, folders: List<String>): String =
+        folders.joinToString("") { " AND $column NOT LIKE ? ESCAPE '\\'" }
+
+    fun args(folders: List<String>): Array<String> =
+        folders.map { it.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%" }.toTypedArray()
 }
 
 /**
@@ -161,8 +186,11 @@ class PhotoRepository(private val context: Context) {
     private val resolver get() = context.contentResolver
     private val collection: Uri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
 
+    /** Read at each query, so a change in the options applies to the next scan. */
+    private val excludedFolders: List<String> get() = Settings(context).excludedFolders
+
     /**
-     * JPGs whose capture date falls inside [startMs]..[endMs], both ends inclusive.
+     * JPGs and PNGs whose capture date falls inside [startMs]..[endMs], both ends inclusive.
      *
      * Screenshots and downloaded images routinely have a null DATE_TAKEN, so for those rows the
      * range is matched against DATE_MODIFIED instead — a plain `DATE_TAKEN BETWEEN ...` would
@@ -188,8 +216,8 @@ class PhotoRepository(private val context: Context) {
         resolver.query(
             collection,
             projection,
-            JpgQuery.selection,
-            JpgQuery.args(startMs, endMs),
+            JpgQuery.selection(excludedFolders),
+            JpgQuery.args(startMs, endMs, excludedFolders),
             "$taken ASC, $modified ASC",
         )
             ?.use { cursor ->
@@ -561,9 +589,12 @@ class PhotoRepository(private val context: Context) {
             MediaStore.Video.Media.HEIGHT,
             MediaStore.Video.Media.MIME_TYPE,
         )
+        val excluded = excludedFolders
         val selection = "(($taken IS NOT NULL AND $taken > 0 AND $taken BETWEEN ? AND ?) OR " +
-            "(($taken IS NULL OR $taken <= 0) AND $modified BETWEEN ? AND ?))"
-        val args = arrayOf(startMs.toString(), endMs.toString(), (startMs / 1000).toString(), (endMs / 1000).toString())
+            "(($taken IS NULL OR $taken <= 0) AND $modified BETWEEN ? AND ?))" +
+            FolderExclusion.sql(MediaStore.Video.Media.RELATIVE_PATH, excluded)
+        val args = arrayOf(startMs.toString(), endMs.toString(), (startMs / 1000).toString(), (endMs / 1000).toString()) +
+            FolderExclusion.args(excluded)
         val out = ArrayList<SourceVideo>()
         resolver.query(videoCollection, projection, selection, args, "$taken ASC, $modified ASC")?.use { c ->
             while (c.moveToNext()) {
@@ -631,6 +662,51 @@ class PhotoRepository(private val context: Context) {
         }
     }
 
+    /**
+     * Videos in the range whose `_HEVC.mp4` copy is still beside them — the video run's delete
+     * prompt was declined or the run was cancelled, so the original was never removed and the copy
+     * never took its name. Paired with that copy's URI, to rename once the original goes.
+     *
+     * As with photos and songs, a name match alone does not justify deleting: the copy must also be
+     * non-empty and run as long as the original.
+     */
+    fun findStrandedVideos(range: DateRange): List<Pair<SourceVideo, Uri>> {
+        val suffix = SourceVideo.CONVERTED_SUFFIX + ".mp4"
+        val originals = queryVideos(range.startMs, range.endMs).filterNot { it.displayName.endsWith(suffix, ignoreCase = true) }
+        if (originals.isEmpty()) return emptyList()
+
+        val copies = HashMap<String, Pair<Uri, Long>>()
+        resolver.query(
+            videoCollection,
+            arrayOf(
+                MediaStore.Video.Media._ID,
+                MediaStore.Video.Media.DISPLAY_NAME,
+                MediaStore.Video.Media.RELATIVE_PATH,
+                MediaStore.Video.Media.VOLUME_NAME,
+                MediaStore.Video.Media.SIZE,
+                MediaStore.Video.Media.DURATION,
+            ),
+            "${MediaStore.Video.Media.DISPLAY_NAME} LIKE ?", arrayOf("%$suffix"), null,
+        )?.use { c ->
+            while (c.moveToNext()) {
+                val name = c.getString(1) ?: continue
+                if (c.getLong(4) <= 0L) continue
+                val duration = c.getLongOrNull(5)?.takeIf { it > 0 } ?: continue
+                val volume = c.getString(3) ?: MediaStore.VOLUME_EXTERNAL_PRIMARY
+                copies[key(volume, c.getString(2) ?: "", name)] =
+                    ContentUris.withAppendedId(videoCollection, c.getLong(0)) to duration
+            }
+        }
+
+        return originals.mapNotNull { video ->
+            if (video.durationMs <= 0) return@mapNotNull null
+            val (copy, duration) = copies[key(video.volumeName, PhotoNaming.targetVideoPath(video.relativePath), video.convertedName)]
+                ?: return@mapNotNull null
+            val close = kotlin.math.abs(duration - video.durationMs) <= maxOf(DURATION_MATCH_TOLERANCE_MS, video.durationMs / 100)
+            if (close) video to copy else null
+        }
+    }
+
     /** Gives a converted video its original's name once the original is gone. */
     fun renameVideo(uri: Uri, name: String): Boolean = runCatching {
         resolver.update(uri, ContentValues().apply { put(MediaStore.Video.Media.DISPLAY_NAME, name) }, null, null) > 0
@@ -646,10 +722,13 @@ class PhotoRepository(private val context: Context) {
     private val audioCollection: Uri = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
 
     /**
-     * Every MP3 the music library knows of, folder by folder. Not limited to the date range: songs
-     * have no capture date, and the range is about when photos were taken.
+     * Every MP3, AAC song (`.m4a`) and FLAC the music library knows of, folder by folder. Not limited to
+     * the date range: songs have no capture date, and the range is about when photos were taken.
+     *
+     * Matched by MIME type, and by name as well: MediaStore has been seen filing whole albums of
+     * `.m4a` as `audio/mpeg`. What the file really holds is checked when it is decoded.
      */
-    fun queryMusicMp3s(): List<SourceTrack> {
+    fun queryMusicToConvert(): List<SourceTrack> {
         val projection = arrayOf(
             MediaStore.Audio.Media._ID,
             MediaStore.Audio.Media.DISPLAY_NAME,
@@ -659,10 +738,18 @@ class PhotoRepository(private val context: Context) {
             MediaStore.Audio.Media.DURATION,
             MediaStore.Audio.Media.BITRATE,
         )
-        val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0 AND ${MediaStore.Audio.Media.MIME_TYPE} = ?"
+        val excluded = excludedFolders
+        val mimes = SOURCE_AUDIO_MIMES.joinToString(", ") { "?" }
+        // Not .m4p: iTunes Store copy protection (FairPlay). The audio is encrypted, so nothing on
+        // the phone can decode it — or play it — and it would only ever be reported as failing.
+        val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0 AND " +
+            "(${MediaStore.Audio.Media.MIME_TYPE} IN ($mimes) OR ${MediaStore.Audio.Media.DISPLAY_NAME} LIKE ?) AND " +
+            "${MediaStore.Audio.Media.DISPLAY_NAME} NOT LIKE ?" +
+            FolderExclusion.sql(MediaStore.Audio.Media.RELATIVE_PATH, excluded)
         val out = ArrayList<SourceTrack>()
         resolver.query(
-            audioCollection, projection, selection, arrayOf("audio/mpeg"),
+            audioCollection, projection, selection,
+            (SOURCE_AUDIO_MIMES + "%.m4a" + "%.m4p").toTypedArray() + FolderExclusion.args(excluded),
             "${MediaStore.Audio.Media.RELATIVE_PATH} ASC, ${MediaStore.Audio.Media.DISPLAY_NAME} ASC",
         )?.use { c ->
             while (c.moveToNext()) {
@@ -689,6 +776,119 @@ class PhotoRepository(private val context: Context) {
             arrayOf(PhotoNaming.targetAudioPath(track.relativePath), track.opusName),
             null,
         )?.use { it.count > 0 } ?: false
+
+    /**
+     * MP3s that already have their `.opus` beside them — kept by a run that was cancelled, had
+     * "Delete originals" off, or whose delete prompt was declined. The music run skips exactly
+     * these ([opusExistsBeside]), so without this they would never be cleared.
+     *
+     * As with [findStrandedOriginals], a name match alone does not justify deleting the MP3: the
+     * copy must also be non-empty and run as long, which a truncated or unrelated file would not.
+     */
+    fun findStrandedMp3s(): List<SourceTrack> {
+        val mp3s = queryMusicToConvert()
+        if (mp3s.isEmpty()) return emptyList()
+
+        val opusDurations = mutableMapOf<String, Long>()
+        val projection = arrayOf(
+            MediaStore.Audio.Media.DISPLAY_NAME,
+            MediaStore.Audio.Media.RELATIVE_PATH,
+            MediaStore.Audio.Media.VOLUME_NAME,
+            MediaStore.Audio.Media.SIZE,
+            MediaStore.Audio.Media.DURATION,
+        )
+        val selection = "${MediaStore.Audio.Media.DISPLAY_NAME} LIKE ?"
+        resolver.query(audioCollection, projection, selection, arrayOf("%.opus"), null)?.use { c ->
+            while (c.moveToNext()) {
+                val name = c.getString(0) ?: continue
+                if (c.getLong(3) <= 0L) continue
+                val duration = c.getLongOrNull(4)?.takeIf { it > 0 } ?: continue
+                val volume = c.getString(2) ?: MediaStore.VOLUME_EXTERNAL_PRIMARY
+                opusDurations[key(volume, c.getString(1) ?: "", name)] = duration
+            }
+        }
+
+        return mp3s.filter { mp3 ->
+            if (mp3.durationMs <= 0) return@filter false
+            val expected = key(mp3.volumeName, PhotoNaming.targetAudioPath(mp3.relativePath), mp3.opusName)
+            val opus = opusDurations[expected] ?: return@filter false
+            kotlin.math.abs(opus - mp3.durationMs) <= maxOf(DURATION_MATCH_TOLERANCE_MS, mp3.durationMs / 100)
+        }
+    }
+
+    /**
+     * Every `.m4p` in the music library: iTunes Store purchases under FairPlay copy protection,
+     * whose audio is encrypted, so nothing on the phone can play or convert them.
+     */
+    fun queryProtectedSongs(): List<OpusRow> {
+        val projection = arrayOf(
+            MediaStore.Audio.Media._ID,
+            MediaStore.Audio.Media.DISPLAY_NAME,
+            MediaStore.Audio.Media.SIZE,
+            @Suppress("DEPRECATION") MediaStore.Audio.Media.DATA,
+        )
+        val rows = ArrayList<OpusRow>()
+        resolver.query(
+            audioCollection, projection, "${MediaStore.Audio.Media.DISPLAY_NAME} LIKE ?", arrayOf("%.m4p"),
+            "${MediaStore.Audio.Media.RELATIVE_PATH} ASC, ${MediaStore.Audio.Media.DISPLAY_NAME} ASC",
+        )?.use { c ->
+            while (c.moveToNext()) {
+                val id = c.getLong(0)
+                rows += OpusRow(
+                    uri = ContentUris.withAppendedId(audioCollection, id),
+                    id = id,
+                    displayName = c.getString(1) ?: continue,
+                    sizeBytes = c.getLong(2),
+                    path = c.getString(3),
+                )
+            }
+        }
+        return rows
+    }
+
+    /** Every `.opus` in the music library, folder by folder: what the music repair looks through. */
+    fun queryOpus(): List<OpusRow> {
+        val projection = arrayOf(
+            MediaStore.Audio.Media._ID,
+            MediaStore.Audio.Media.DISPLAY_NAME,
+            MediaStore.Audio.Media.SIZE,
+            @Suppress("DEPRECATION") MediaStore.Audio.Media.DATA,
+        )
+        val rows = ArrayList<OpusRow>()
+        resolver.query(
+            audioCollection, projection, "${MediaStore.Audio.Media.DISPLAY_NAME} LIKE ?", arrayOf("%.opus"),
+            "${MediaStore.Audio.Media.RELATIVE_PATH} ASC, ${MediaStore.Audio.Media.DISPLAY_NAME} ASC",
+        )?.use { c ->
+            while (c.moveToNext()) {
+                val id = c.getLong(0)
+                rows += OpusRow(
+                    uri = ContentUris.withAppendedId(audioCollection, id),
+                    id = id,
+                    displayName = c.getString(1) ?: continue,
+                    sizeBytes = c.getLong(2),
+                    path = c.getString(3),
+                )
+            }
+        }
+        return rows
+    }
+
+    /** The year MediaStore currently shows for each song in [ids]; absent or null when it shows none. */
+    fun musicYears(ids: Collection<Long>): Map<Long, Int?> {
+        val out = HashMap<Long, Int?>()
+        for (chunk in ids.chunked(QUERY_CHUNK)) {
+            resolver.query(
+                audioCollection,
+                arrayOf(MediaStore.Audio.Media._ID, MediaStore.Audio.Media.YEAR),
+                "${MediaStore.Audio.Media._ID} IN (${chunk.joinToString(",") { "?" }})",
+                chunk.map { it.toString() }.toTypedArray(),
+                null,
+            )?.use { c ->
+                while (c.moveToNext()) out[c.getLong(0)] = c.getLongOrNull(1)?.toInt()?.takeIf { it > 0 }
+            }
+        }
+        return out
+    }
 
     /**
      * Publishes [staged] as [SourceTrack.opusName] beside the original, and returns its URI. The
@@ -938,6 +1138,18 @@ class PhotoRepository(private val context: Context) {
 
         /** EXIF stores whole seconds, so a rescanned HEIC may differ in the milliseconds. */
         private const val DATE_MATCH_TOLERANCE_MS = 1000L
+
+        /**
+         * An MP3's MediaStore duration is the scanner's estimate, and the Opus copy carries the
+         * encoder's padding; a real copy lands within a few tens of milliseconds.
+         */
+        private const val DURATION_MATCH_TOLERANCE_MS = 2000L
+
+        /** MP3, the names MediaStore gives AAC in an MP4 or bare, and FLAC. */
+        private val SOURCE_AUDIO_MIMES = listOf(
+            "audio/mpeg", "audio/mp4", "audio/x-m4a", "audio/m4a", "audio/aac", "audio/aacp", "audio/mp4a-latm",
+            "audio/flac", "audio/x-flac",
+        )
         private const val TAG = "PhotoRepository"
     }
 }

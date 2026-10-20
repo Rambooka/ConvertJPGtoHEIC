@@ -178,52 +178,104 @@
             android:checked="true"
             android:text="@string/opt_delete_originals" />
 
-        <!-- Actions -->
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/dryRunButton"
-            style="@style/Widget.Material3.Button.TonalButton"
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/switchTrash"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
-            android:text="@string/action_dry_run" />
+            android:layout_marginTop="8dp"
+            android:checked="false"
+            android:text="@string/opt_trash" />
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="@string/action_dry_run_hint"
+            android:layout_marginStart="4dp"
+            android:text="@string/opt_trash_hint"
+            android:textAppearance="?attr/textAppearanceBodySmall" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/switchKeepScreenOn"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:checked="true"
+            android:text="@string/opt_keep_screen_on" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:text="@string/opt_keep_screen_on_hint"
+            android:textAppearance="?attr/textAppearanceBodySmall" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/switchOnlyCharging"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:checked="false"
+            android:text="@string/opt_only_charging" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:text="@string/opt_only_charging_hint"
+            android:textAppearance="?attr/textAppearanceBodySmall" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/excludeFoldersButton"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/exclude_button" />
+
+        <TextView
+            android:id="@+id/excludeFoldersHint"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:textAppearance="?attr/textAppearanceBodySmall"
+            tools:text="Left alone: Android/" />
+
+        <!-- Not restored from settings: left on, it would make every run quietly do nothing. -->
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/switchDryRun"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:checked="false"
+            android:saveEnabled="false"
+            android:text="@string/opt_dry_run" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:text="@string/opt_dry_run_hint"
+            android:textAppearance="?attr/textAppearanceBodySmall" />
+
+        <!-- Actions -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="@string/action_convert_hint"
             android:textAppearance="?attr/textAppearanceBodySmall" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/convertButton"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="4dp"
             android:text="@string/action_convert" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/cancelButton"
-            style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:text="@string/action_cancel"
-            android:visibility="gone"
-            tools:visibility="visible" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/cleanupButton"
-            style="@style/Widget.Material3.Button.OutlinedButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:text="@string/action_cleanup" />
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="@string/action_cleanup_hint"
+            android:layout_marginTop="16dp"
+            android:text="@string/action_videos_hint"
             android:textAppearance="?attr/textAppearanceBodySmall" />
 
         <com.google.android.material.button.MaterialButton
@@ -231,14 +283,14 @@
             style="@style/Widget.Material3.Button.OutlinedButton"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="4dp"
             android:text="@string/action_videos" />
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="@string/action_videos_hint"
+            android:layout_marginTop="16dp"
+            android:text="@string/action_music_hint"
             android:textAppearance="?attr/textAppearanceBodySmall" />
 
         <com.google.android.material.button.MaterialButton
@@ -246,14 +298,14 @@
             style="@style/Widget.Material3.Button.OutlinedButton"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="4dp"
             android:text="@string/action_music" />
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="@string/action_music_hint"
+            android:layout_marginTop="16dp"
+            android:text="@string/action_repair_hint"
             android:textAppearance="?attr/textAppearanceBodySmall" />
 
         <com.google.android.material.button.MaterialButton
@@ -261,15 +313,90 @@
             style="@style/Widget.Material3.Button.OutlinedButton"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="4dp"
             android:text="@string/action_repair" />
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="@string/action_repair_hint"
+            android:layout_marginTop="16dp"
+            android:text="@string/action_music_repair_hint"
             android:textAppearance="?attr/textAppearanceBodySmall" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/musicRepairButton"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="@string/action_music_repair" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="@string/action_delete_protected_hint"
+            android:textAppearance="?attr/textAppearanceBodySmall" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/deleteProtectedButton"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="@string/action_delete_protected" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="@string/action_cleanup_hint"
+            android:textAppearance="?attr/textAppearanceBodySmall" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/cleanupButton"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="@string/action_cleanup" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="@string/action_view_log_hint"
+            android:textAppearance="?attr/textAppearanceBodySmall" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/viewLogButton"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="@string/action_view_log" />
+
+        <!-- Run controls: shown only while a run is going, so beside its progress. -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/cancelButton"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="@string/action_cancel"
+            android:visibility="gone"
+            tools:visibility="visible" />
+
+        <!-- For a delete or allow-changes prompt that went away unanswered (the screen locked). -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/reshowPromptButton"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="@string/action_reshow_prompt"
+            android:visibility="gone"
+            tools:visibility="visible" />
 
         <!-- Progress -->
         <com.google.android.material.progressindicator.LinearProgressIndicator

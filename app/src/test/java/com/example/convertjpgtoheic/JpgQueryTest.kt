@@ -14,9 +14,10 @@ class JpgQueryTest {
     @Test
     fun `placeholder count matches the argument count`() {
         // A mismatch here throws at query time on device and would never show up in a build.
-        val placeholders = JpgQuery.selection.count { it == '?' }
-
-        assertEquals(placeholders, JpgQuery.args(0L, 1L).size)
+        for (excluded in listOf(emptyList(), listOf("Android/"), listOf("Android/", "DCIM/Wallpaper/"))) {
+            val placeholders = JpgQuery.selection(excluded).count { it == '?' }
+            assertEquals(placeholders, JpgQuery.args(0L, 1L, excluded).size)
+        }
     }
 
     @Test
@@ -24,28 +25,37 @@ class JpgQueryTest {
         val start = 1_700_000_000_000L
         val end = 1_700_086_399_999L
 
-        val args = JpgQuery.args(start, end)
+        val args = JpgQuery.args(start, end, emptyList())
 
-        assertEquals(start.toString(), args[2])
-        assertEquals(end.toString(), args[3])
-        assertEquals((start / 1000).toString(), args[4])
-        assertEquals((end / 1000).toString(), args[5])
+        assertEquals(start.toString(), args[3])
+        assertEquals(end.toString(), args[4])
+        assertEquals((start / 1000).toString(), args[5])
+        assertEquals((end / 1000).toString(), args[6])
     }
 
     @Test
-    fun `matches both jpeg mime spellings`() {
-        val args = JpgQuery.args(0L, 1L)
+    fun `matches both jpeg mime spellings, and png`() {
+        val args = JpgQuery.args(0L, 1L, emptyList())
 
         assertTrue(args.contains("image/jpeg"))
         assertTrue(args.contains("image/jpg"))
+        assertTrue(args.contains("image/png"))
     }
 
     @Test
     fun `treats a zero date taken as unknown, not as a real date`() {
         assertTrue(
             "a 0 DATE_TAKEN must fall through to the DATE_MODIFIED branch",
-            JpgQuery.selection.contains("> 0") && JpgQuery.selection.contains("<= 0"),
+            JpgQuery.selection(emptyList()).contains("> 0") && JpgQuery.selection(emptyList()).contains("<= 0"),
         )
+    }
+
+    @Test
+    fun `excluded folders become escaped NOT LIKE prefixes`() {
+        val folders = listOf("Android/", "DCIM/My_Pics/")
+        assertEquals(" AND p NOT LIKE ? ESCAPE '\\' AND p NOT LIKE ? ESCAPE '\\'", FolderExclusion.sql("p", folders))
+        assertEquals(listOf("Android/%", "DCIM/My\\_Pics/%"), FolderExclusion.args(folders).toList())
+        assertEquals("", FolderExclusion.sql("p", emptyList()))
     }
 
     @Test

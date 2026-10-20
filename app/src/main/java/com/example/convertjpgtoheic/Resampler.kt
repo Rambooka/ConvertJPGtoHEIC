@@ -91,14 +91,30 @@ class Resampler(private val inRate: Int, private val outRate: Int, private val c
             if (n + half >= end) break
             val row = (pos % up).toInt() * taps
             val first = ((n - half + 1 - bufStart) * channels).toInt()
-            for (c in 0 until channels) {
-                var acc = 0f
-                var i = first + c
+            if (channels == 2) {
+                // Both channels in one pass over the taps: each coefficient is read once, and the
+                // two sums keep the core's pipelines busy. Most music is stereo.
+                var left = 0f
+                var right = 0f
+                var i = first
                 for (j in 0 until taps) {
-                    acc += buf[i] * table[row + j]
-                    i += channels
+                    val t = table[row + j]
+                    left += buf[i] * t
+                    right += buf[i + 1] * t
+                    i += 2
                 }
-                out.add(acc)
+                out.add(left)
+                out.add(right)
+            } else {
+                for (c in 0 until channels) {
+                    var acc = 0f
+                    var i = first + c
+                    for (j in 0 until taps) {
+                        acc += buf[i] * table[row + j]
+                        i += channels
+                    }
+                    out.add(acc)
+                }
             }
             outFrames++
         }

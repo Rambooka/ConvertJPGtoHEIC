@@ -4,6 +4,9 @@ import android.app.ActivityManager
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.PorterDuff
 import android.opengl.EGL14
 import android.opengl.EGLConfig
 import android.opengl.GLES20
@@ -45,6 +48,8 @@ sealed interface EncodeResult {
         val file: File? = null,
         /** The image was shrunk to fit the encoder, so [width]x[height] is smaller than the source. */
         val downscaled: Boolean = false,
+        /** A PNG with transparent areas: they were filled white, as HEIC has no transparency here. */
+        val flattenedTransparency: Boolean = false,
     ) : EncodeResult
 
     data class Failure(val reason: String) : EncodeResult
@@ -249,6 +254,7 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
         allowShrink: Boolean,
         trailerStart: Long?,
     ): EncodeResult {
+        if (wedged) return EncodeResult.Failure("the encoder is stuck; close and reopen the app")
         val decoded = try {
             decode(photo, allowShrink)
         } catch (e: OutOfMemoryError) {
@@ -262,6 +268,8 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
         val bitmap = decoded.bitmap
         val width = bitmap.width
         val height = bitmap.height
+        // Set when the encode is abandoned: the stuck writer is still reading the bitmap.
+        var stillInUse = false
 
         return try {
             writeHeif(target, bitmap, quality, metadata.exif, rotationDegrees)
@@ -276,7 +284,12 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
                 }
                 bytes = sizeOf(target)
             }
-            EncodeResult.Success(bytes, width, height, (target as? HeicTarget.Staging)?.file, decoded.downscaled)
+            EncodeResult.Success(
+                bytes, width, height, (target as? HeicTarget.Staging)?.file, decoded.downscaled, decoded.flattenedTransparency,
+            )
+        } catch (e: EncoderStalled) {
+            stillInUse = true
+            EncodeResult.Failure("the encoder stopped responding (gave up after ${ENCODE_TIMEOUT_MS / 1000} s)")
         } catch (e: Exception) {
             Log.e(TAG, "HEIC encode failed for ${photo.displayName}", e)
             // Include the message, not just the class. FileNotFoundException alone cannot
@@ -287,7 +300,7 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
             Log.e(TAG, "Out of memory encoding ${photo.displayName}", e)
             EncodeResult.Failure("too large to encode (out of memory)")
         } finally {
-            bitmap.recycle()
+            if (!stillInUse) bitmap.recycle()
         }
     }
 
@@ -327,7 +340,7 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
     }
 
     /** A decoded image plus whether it had to be shrunk on the way in. */
-    private class Decoded(val bitmap: Bitmap, val downscaled: Boolean)
+    private class Decoded(val bitmap: Bitmap, val downscaled: Boolean, val flattenedTransparency: Boolean = false)
 
     /**
      * Refuses up front if this image cannot be encoded — too big for memory, or (unless
@@ -411,15 +424,43 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
             }
         }
 
+        val png = photo.displayName.endsWith(".png", ignoreCase = true)
         val options = BitmapFactory.Options().apply {
             inPreferredConfig = Bitmap.Config.ARGB_8888
             inSampleSize = sampleSize
+            // Mutable so transparency can be filled in place, without a second full-size bitmap.
+            inMutable = png
         }
         // Redaction only strips metadata, never pixels, so the decode does not need the original.
         val bitmap = repository.openOriginal(photo.uri, requireOriginal = false)
             ?.use { BitmapFactory.decodeStream(it, null, options) }
             ?: return null
-        return Decoded(bitmap, downscaled = sampleSize > 1)
+        // HeifWriter writes no alpha channel, so transparent areas would come out black. White
+        // behind them instead, as a viewer shows a transparent PNG. Opaque pixels are unchanged.
+        var flattened = false
+        if (bitmap.hasAlpha() && bitmap.isMutable) {
+            // Only counted when something was actually see-through: most PNGs carry an alpha
+            // channel that is opaque everywhere.
+            flattened = hasTransparentPixels(bitmap)
+            Canvas(bitmap).drawColor(Color.WHITE, PorterDuff.Mode.DST_OVER)
+            bitmap.setHasAlpha(false)
+        }
+        return Decoded(bitmap, downscaled = sampleSize > 1, flattenedTransparency = flattened)
+    }
+
+    /** Whether any pixel of [bitmap] is less than fully opaque, sampled on a grid, so a huge PNG costs little. */
+    private fun hasTransparentPixels(bitmap: Bitmap): Boolean {
+        val step = maxOf(1, maxOf(bitmap.width, bitmap.height) / ALPHA_SAMPLE_GRID)
+        var y = 0
+        while (y < bitmap.height) {
+            var x = 0
+            while (x < bitmap.width) {
+                if (bitmap.getPixel(x, y) ushr 24 != 0xFF) return true
+                x += step
+            }
+            y += step
+        }
+        return false
     }
 
     /**
@@ -472,7 +513,7 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
 
         // Grid mode (on by default) tiles the image for the HEVC encoder, which is what lets a
         // full-resolution phone photo through at all.
-        builder
+        val configured = builder
             .setQuality(quality)
             .setMaxImages(1)
             .setPrimaryIndex(0)
@@ -482,16 +523,51 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
             .setRotation(rotationDegrees)
             // One shared looper instead of two fresh threads per photo. See [encoderThread].
             .setHandler(handler)
-            .build()
-            .use { writer ->
-                writer.start()
-                if (exif != null) writer.addExifData(0, exif, 0, exif.size)
-                writer.addBitmap(bitmap)
-                writer.stop(STOP_TIMEOUT_MS)
+
+        // addBitmap blocks inside EGL with no timeout of its own, and a stalled encoder used to
+        // wedge the whole run with nothing able to end it. So the write runs on a thread of its
+        // own, watched from here. One that never finishes cannot be stopped — it is stuck in the
+        // GPU driver — so it is abandoned, still holding the bitmap, and [wedged] is set.
+        val finished = CountDownLatch(1)
+        var failure: Throwable? = null
+        Thread({
+            try {
+                configured.build().use { writer ->
+                    writer.start()
+                    if (exif != null) writer.addExifData(0, exif, 0, exif.size)
+                    writer.addBitmap(bitmap)
+                    writer.stop(STOP_TIMEOUT_MS)
+                }
+            } catch (t: Throwable) {
+                failure = t
+            } finally {
+                finished.countDown()
             }
+        }, "heic-write").start()
+
+        if (!finished.await(ENCODE_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            Log.e(TAG, "HEIC encode did not finish within ${ENCODE_TIMEOUT_MS / 1000} s; abandoning it")
+            wedged = true
+            // Its looper may still be wanted by the stuck writer; leave it, and never reuse it.
+            encoderThread = null
+            throw EncoderStalled()
+        }
+        failure?.let { throw it }
 
         awaitClose(handler)
     }
+
+    /** The encoder stopped responding mid-photo; see [wedged]. */
+    class EncoderStalled : Exception("the encoder stopped responding")
+
+    /**
+     * An encode was abandoned, stuck in the GPU driver. Nothing further is encoded until the app
+     * is restarted: the next one would most likely stick too, and the stuck one still holds its
+     * bitmap's memory.
+     */
+    @Volatile
+    var wedged = false
+        private set
 
     /**
      * Waits for the close [HeifWriter.close] queued to finish.
@@ -508,6 +584,39 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
         if (!closed.await(STOP_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
             Log.w(TAG, "Encoder did not finish closing within ${STOP_TIMEOUT_MS}ms")
         }
+    }
+
+    /**
+     * Why the HEIC just written at [uri] is not a sound copy, or null if it is.
+     *
+     * Music is read back and video re-read before an original goes; a HEIC only had to be bigger
+     * than nothing. This decodes the file as a viewer would: its header must give the encoded
+     * size (either way round, since the decoder may apply the container rotation), and the whole
+     * image must decode — at a sixty-fourth of its pixels, enough to reach every tile.
+     */
+    fun verifyWritten(uri: android.net.Uri, width: Int, height: Int): String? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        // A bounds-only decode returns no bitmap by design; the header is in [bounds].
+        val header = repository.openOriginal(uri, requireOriginal = false) ?: return "the new file could not be opened"
+        header.use { BitmapFactory.decodeStream(it, null, bounds) }
+        val w = bounds.outWidth
+        val h = bounds.outHeight
+        if (w <= 0 || h <= 0) return "the new file has no readable image header"
+        if (!((w == width && h == height) || (w == height && h == width))) {
+            return "the new file reads as ${w}x$h, not ${width}x$height"
+        }
+        val sample = BitmapFactory.Options().apply {
+            inSampleSize = VERIFY_SAMPLE
+            inPreferredConfig = Bitmap.Config.RGB_565
+        }
+        val decoded = try {
+            repository.openOriginal(uri, requireOriginal = false)?.use { BitmapFactory.decodeStream(it, null, sample) }
+        } catch (e: Exception) {
+            Log.w(TAG, "Read-back failed for $uri", e)
+            null
+        } ?: return "the new file does not decode"
+        decoded.recycle()
+        return null
     }
 
     /** Clears anything a crashed or cancelled run left behind. */
@@ -531,8 +640,18 @@ class HeicEncoder(context: Context, private val repository: PhotoRepository) {
         private const val TAG = "HeicEncoder"
         private const val STOP_TIMEOUT_MS = 60_000L
 
+        /** How long one photo's encode may take before it counts as stuck. A 64 MP photo, the
+         *  largest let through, takes well under a minute; a stall never ends. */
+        private const val ENCODE_TIMEOUT_MS = 120_000L
+
         /** ARGB_8888. */
         private const val BYTES_PER_PIXEL = 4
+
+        /** Transparency is looked for on at most this many points along the longer side. */
+        private const val ALPHA_SAMPLE_GRID = 256
+
+        /** Read-back decodes at 1/8 on each side: every tile is touched for a sixty-fourth of the work. */
+        private const val VERIFY_SAMPLE = 8
 
         /** Spend only this share of free memory on the bitmap, leaving room for the encoder's own
          *  buffers and other apps rather than driving the device to zero. */

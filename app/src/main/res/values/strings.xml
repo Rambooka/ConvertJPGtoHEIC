@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">Convert JPG to HEIC by Ray</string>
+    <string name="app_name">Convert Media by Ray</string>
 
     <string name="section_range">Date range</string>
     <string name="section_options">Options</string>
@@ -9,7 +9,7 @@
     <string name="range_title">Photos taken between</string>
 
     <string name="opt_only_smaller">Only keep the HEIC if it is smaller</string>
-    <string name="opt_skip_small">Skip JPGs under 1 MB</string>
+    <string name="opt_skip_small">Skip pictures under 1 MB</string>
     <string name="opt_shrink_oversized">Shrink oversized photos to fit the encoder</string>
     <string name="opt_skip_existing">Skip photos already converted</string>
 
@@ -24,14 +24,45 @@
 
     <string name="opt_delete_originals">Delete originals after converting</string>
 
-    <string name="action_dry_run">Dry run</string>
-    <string name="action_dry_run_hint">Converts in memory to measure the real saving. Nothing is
-        added to your gallery and no original is deleted.</string>
-    <string name="action_convert">Convert</string>
+    <string name="opt_trash">Move originals to the trash instead of deleting</string>
+    <string name="opt_trash_hint">They can be restored from the gallery\'s trash for 30 days. The space
+        only comes back when the trash empties.</string>
+    <string name="opt_keep_screen_on">Keep the screen on while converting</string>
+    <string name="opt_keep_screen_on_hint">With the screen off the phone runs the app on its slow cores:
+        a song that takes a minute takes ten or more.</string>
+    <string name="opt_only_charging">Only while charging</string>
+    <string name="opt_only_charging_hint">A run pauses when the charger is unplugged and carries on when
+        it is back. Runs always pause while the phone is too hot.</string>
+    <string name="exclude_button">Folders to leave alone…</string>
+    <string name="exclude_hint">Left alone: %1$s</string>
+    <string name="exclude_title">Folders to leave alone</string>
+    <string name="exclude_message">One folder per line, as it appears under the phone\'s storage, e.g.
+        DCIM/Wallpaper/. Everything inside is left out of every run and the clean-up. Android/ covers
+        the pictures other apps keep for themselves (WhatsApp, for one): a converted copy cannot go
+        back there, and deleting the original breaks that app\'s own records.</string>
+    <string name="exclude_example">Android/\nDCIM/Wallpaper/</string>
+    <string name="action_view_log">View last run\'s log</string>
+    <string name="action_view_log_hint">Every run writes a log: its settings, each file that failed and
+        why, and a closing summary. The 30 newest are kept under
+        Android/data/com.example.convertjpgtoheic/files/logs.</string>
+    <string name="log_none">No run has been logged yet.</string>
+    <string name="log_share">Share</string>
+    <string name="log_close">Close</string>
+    <string name="opt_dry_run">Dry run: measure only, change nothing</string>
+    <string name="opt_dry_run_hint">Pictures, videos and music are converted to measure the real
+        saving, then thrown away. Nothing is added and nothing deleted. Takes as long as a real run.
+        Off again each time the app opens.</string>
+    <string name="action_convert_hint">Re-encodes the JPG and PNG pictures in this range as HEIC,
+        usually about half the size, keeping dates, location and rotation. Uses the quality, options
+        and delete setting above; each HEIC is checked before its original is offered for deletion.</string>
+    <string name="action_convert">Convert pictures to HEIC</string>
     <string name="action_cleanup">Clean up leftovers</string>
-    <string name="action_cleanup_hint">Finds JPGs in this range that already have a HEIC beside
-        them — left behind by a run that was cancelled or whose delete prompt was declined.</string>
+    <string name="action_cleanup_hint">Deletes originals that were converted but never removed,
+        because a run was cancelled or its delete prompt declined: pictures (JPG, PNG) with a HEIC
+        and videos with an _HEVC copy, both in this range, and songs (MP3, M4A, FLAC) of any date
+        with an Opus copy. Each video\'s copy then takes the original\'s name.</string>
     <string name="action_cancel">Cancel</string>
+    <string name="action_reshow_prompt">Show the prompt again</string>
     <string name="action_view">View</string>
     <string name="action_delete">Delete</string>
     <string name="failures_heading">Failed photos</string>
@@ -64,7 +95,7 @@
     <string name="run_saved">Converted %1$d · saved %2$s so far</string>
     <string name="run_saved_stills">  Stills: %1$d · saved %2$s</string>
     <string name="run_saved_motion">  Motion: %1$d · saved %2$s</string>
-    <string name="run_skipped_small">Skipped under 1 MB: %1$d · %2$s left as JPG</string>
+    <string name="run_skipped_small">Skipped under 1 MB: %1$d · %2$s left as they were</string>
     <string name="run_counters">Skipped: motion %1$d · already done %2$d · not smaller %3$d · name clash %4$d · failed %5$d</string>
 
     <string name="quality_label">HEIC quality: %1$d</string>
@@ -74,8 +105,8 @@
     <string name="already_running">Already working. Wait for it to finish.</string>
     <string name="finish_deletion_first">Finish the pending deletion before starting another run.</string>
     <string name="scanning">Scanning…</string>
-    <string name="scan_none">No JPGs found in this range.</string>
-    <string name="scan_summary">%1$d JPGs · %2$s</string>
+    <string name="scan_none">No JPGs or PNGs found in this range.</string>
+    <string name="scan_summary">%1$d JPG/PNG pictures · %2$s</string>
     <string name="progress_measuring">Measuring %1$d of %2$d\n%3$s</string>
     <string name="progress_converting">Converting %1$d of %2$d\n%3$s</string>
     <plurals name="awaiting_deletion_low_space">
@@ -92,7 +123,7 @@ This frees
     </plurals>
     <string name="progress_cleanup">Looking for leftovers…</string>
     <string name="action_videos">Convert videos to HEVC</string>
-    <string name="action_videos_hint">Re-encodes videos in this range from H.264 to HEVC, usually
+    <string name="action_videos_hint">Re-encodes videos (MP4, MOV) in this range from H.264 to HEVC, usually
         about half the size. Slow motion, hyperlapse and other special camera modes are left alone.
         Uses the delete and \"only keep if smaller\" options above.</string>
     <string name="videos_title">Convert videos to HEVC?</string>
@@ -110,28 +141,28 @@ This frees
         <item quantity="other">Waiting for you to confirm deleting %1$d original videos.</item>
     </plurals>
     <string name="action_music">Convert music to Opus</string>
-    <string name="action_music_hint">Re-encodes every MP3 in your music library as Opus (.opus),
+    <string name="action_music_hint">Re-encodes every MP3, M4A and FLAC in your music library as Opus (.opus),
         keeping title, artist, album and cover. A song is only kept as .opus if it comes out
         smaller. Covers the whole library, not just this range. Uses the delete option above.</string>
     <string name="music_title">Convert music to Opus?</string>
-    <string name="music_message_delete">Each MP3 in your music library is re-encoded as Opus and
+    <string name="music_message_delete">Each MP3, M4A and FLAC in your music library is re-encoded as Opus and
         saved beside it as name.opus, with its tags and cover copied across. A copy is only kept if
-        it is smaller than the MP3, and only after it has been checked against it.\n\nYou will be
-        asked to confirm deleting the MP3s every 100 songs. Playlists that list the MP3s will lose
+        it is smaller than the original, and only after it has been checked against it.\n\nYou will be
+        asked to confirm deleting the originals every 100 songs. Playlists that list the originals will lose
         those songs; the new copies can be added back.\n\nRe-encoding a compressed file loses a
-        little quality. It is rarely audible at the bitrates used, but the MP3s cannot be got back
+        little quality. It is rarely audible at the bitrates used, but the originals cannot be got back
         once deleted.</string>
-    <string name="music_message_keep">Each MP3 in your music library is re-encoded as Opus and
+    <string name="music_message_keep">Each MP3, M4A and FLAC in your music library is re-encoded as Opus and
         saved beside it as name.opus, with its tags and cover copied across. A copy is only kept if
-        it is smaller than the MP3, and only after it has been checked against it.\n\n\"Delete
-        originals\" is off, so the MP3s will be kept and both copies will show in your music
+        it is smaller than the original, and only after it has been checked against it.\n\n\"Delete
+        originals\" is off, so the originals will be kept and both copies will show in your music
         app.</string>
     <string name="music_button">Convert</string>
     <string name="music_need_permission">Allow access to music and audio to convert it.</string>
     <string name="progress_music">Converting song %1$d of %2$d · %3$d%%\n%4$s\nConverted %5$d · saved %6$s so far</string>
     <plurals name="awaiting_music_deletion">
-        <item quantity="one">Waiting for you to confirm deleting %1$d MP3.</item>
-        <item quantity="other">Waiting for you to confirm deleting %1$d MP3s.</item>
+        <item quantity="one">Waiting for you to confirm deleting %1$d original.</item>
+        <item quantity="other">Waiting for you to confirm deleting %1$d originals.</item>
     </plurals>
     <string name="action_repair">Repair converted photos</string>
     <string name="action_repair_hint">Fixes HEICs that show sideways in some viewers (Phone Link,
@@ -147,6 +178,30 @@ This frees
     <string name="progress_repair_checking">Checking %1$d of %2$d\n%3$s\nDates fixed: %4$d · Rotation fixed: %5$d\nWaiting for your permission: %6$d</string>
     <string name="progress_repair_writing">Repairing %1$d of %2$d\n%3$s\nDates fixed: %4$d · Rotation fixed: %5$d</string>
     <string name="progress_repair_refreshing">Refreshing the gallery: %1$d of %2$d photos\nAndroid is re-reading each repaired photo so the gallery shows the fix. Keep the app open until this finishes.</string>
+    <string name="action_delete_protected">Delete copy-protected songs (.m4p)</string>
+    <string name="action_delete_protected_hint">Finds iTunes Store songs locked with copy protection.
+        Nothing on this phone can play or convert them.</string>
+    <string name="delete_protected_title">Delete copy-protected songs?</string>
+    <string name="delete_protected_message">This finds every .m4p song on the phone. They are
+        iTunes Store purchases whose audio is encrypted, so no Android app can play them, and they
+        cannot be converted.\n\nAndroid will show you the songs and ask you to confirm before
+        anything is deleted.</string>
+    <string name="action_music_repair">Repair converted music files</string>
+    <string name="action_music_repair_hint">Adds the year to songs already converted to Opus, so
+        music apps show it — it was stored where Android does not look. Only the tags are rewritten;
+        the sound is copied exactly.</string>
+    <string name="music_repair_title">Repair converted music files?</string>
+    <string name="music_repair_message">This checks every .opus song on the phone and gives each
+        one the year tag Android\'s music library reads, taken from the date already in its tags.\n\n
+        The sound is copied exactly, and each file is checked against the original before it is
+        replaced. Android will ask you to allow the changes for any songs this app does not own.</string>
+    <string name="progress_music_repair_checking">Checking %1$d of %2$d\n%3$s\nYears added: %4$d\nWaiting for your permission: %5$d</string>
+    <string name="progress_music_repair_writing">Repairing %1$d of %2$d\n%3$s\nYears added: %4$d</string>
+    <string name="progress_music_repair_refreshing">Refreshing the music library: %1$d of %2$d songs\nAndroid is re-reading each repaired song so music apps show the year. Keep the app open until this finishes.</string>
+    <plurals name="awaiting_music_repair_access">
+        <item quantity="one">Waiting for you to allow the repair of %1$d song.</item>
+        <item quantity="other">Waiting for you to allow the repair of %1$d songs.</item>
+    </plurals>
     <string name="eta_line">About %1$s left · done around %2$s</string>
     <string name="eta_estimating">Working out how long this will take…</string>
     <plurals name="awaiting_repair_access">
@@ -158,6 +213,9 @@ This frees
     <string name="confirm_delete_button">Convert and delete</string>
     <string name="confirm_keep_button">Convert, keep originals</string>
     <string name="cleanup_title">Delete leftover originals?</string>
-    <string name="cleanup_message">Every JPG this finds already has a HEIC beside it in the same
-        folder. You will be asked to confirm before anything is deleted.</string>
+    <string name="cleanup_message">Only originals whose converted copy is already beside them are
+        offered: a picture with a HEIC of the same name and date, a video with an _HEVC copy of the
+        same length, a song with an Opus copy of the same length.\n\nAndroid will list them and ask
+        you to confirm before anything is deleted. Once a video\'s original is gone, its copy is
+        renamed to the original\'s name.</string>
 </resources>

@@ -327,7 +327,7 @@ object Id3Tags {
         ((b[at].toInt() and 0xFF) shl 16) or ((b[at + 1].toInt() and 0xFF) shl 8) or (b[at + 2].toInt() and 0xFF)
 
     /** A Vorbis field name: printable ASCII except '=', conventionally upper case. */
-    private fun vorbisKey(description: String): String? {
+    internal fun vorbisKey(description: String): String? {
         val key = description.trim().uppercase().map { if (it in ' '..'}' && it != '=') it else '_' }.joinToString("")
         return key.takeIf { it.isNotBlank() }
     }
@@ -376,6 +376,9 @@ object Id3Tags {
         "TS2" to "TSO2", "TSA" to "TSOA", "TSP" to "TSOP", "TST" to "TSOT", "TSC" to "TSOC",
         "TXX" to "TXXX", "COM" to "COMM", "ULT" to "USLT", "PIC" to "PIC",
     )
+
+    /** The ID3v1 genre at [index], or null if there is none. */
+    internal fun genreAt(index: Int): String? = GENRES.getOrNull(index)
 
     /** ID3v1 genres with Winamp's extensions, by index. */
     private val GENRES = listOf(

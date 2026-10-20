@@ -85,7 +85,7 @@ class ConversionService : Service() {
                 when (state) {
                     is UiState.Working -> notifyProgress(
                         buildNotification(
-                            text = if (state.mode == RunMode.REPAIR) {
+                            text = state.progress.pausedReason?.let { "Paused — $it" } ?: if (state.mode == RunMode.REPAIR) {
                                 repairNotificationText(state.progress)
                             } else if (state.mode == RunMode.VIDEO || state.mode == RunMode.MUSIC) {
                                 "${state.progress.currentName} · ${(state.progress.itemFraction * 100).toInt()}%" +
@@ -109,10 +109,14 @@ class ConversionService : Service() {
                         buildNotification(
                             text = if (state.mode == RunMode.REPAIR) {
                                 "Allow the repair of ${state.pending} photos"
+                            } else if (state.mode == RunMode.DELETE_PROTECTED) {
+                                "Confirm deleting ${state.pending} copy-protected songs"
+                            } else if (state.mode == RunMode.MUSIC_REPAIR) {
+                                "Allow the repair of ${state.pending} songs"
                             } else if (state.mode == RunMode.VIDEO) {
                                 "Confirm deleting ${state.pending} original videos"
                             } else if (state.mode == RunMode.MUSIC) {
-                                "Confirm deleting ${state.pending} original MP3s"
+                                "Confirm deleting ${state.pending} original songs"
                             } else if (state.lowOnSpace) {
                                 "Storage low — confirm deleting ${state.pending} originals"
                             } else {
@@ -159,9 +163,15 @@ class ConversionService : Service() {
             report.mode == RunMode.REPAIR && report.cancelled -> "Repair cancelled"
             report.mode == RunMode.REPAIR ->
                 "Repaired: ${report.repairedDates} dates, ${report.repairedRotations} rotations"
+            report.mode == RunMode.DELETE_PROTECTED && report.protectedFound == 0 -> "No copy-protected songs found"
+            report.mode == RunMode.DELETE_PROTECTED -> "Deleted ${report.deletedOriginals} copy-protected songs"
+            report.mode == RunMode.MUSIC_REPAIR && report.cancelled -> "Music repair cancelled"
+            report.mode == RunMode.MUSIC_REPAIR -> "Repaired music: ${report.musicYearsFixed} years added"
             report.mode == RunMode.VIDEO && report.cancelled -> "Video conversion cancelled"
+            report.mode == RunMode.VIDEO && report.dryRun -> "Dry run: ${report.converted} videos would convert"
             report.mode == RunMode.VIDEO -> "Converted ${report.converted} videos"
             report.mode == RunMode.MUSIC && report.cancelled -> "Music conversion cancelled"
+            report.mode == RunMode.MUSIC && report.dryRun -> "Dry run: ${report.converted} songs would convert"
             report.mode == RunMode.MUSIC -> "Converted ${report.converted} songs"
 
             report.failureCount > 0 && report.converted == 0 -> "Nothing converted — tap for details"
@@ -215,6 +225,8 @@ class ConversionService : Service() {
                 RunMode.DRY_RUN -> "Measuring photos"
                 RunMode.CLEAN_UP -> "Finding leftovers"
                 RunMode.REPAIR -> "Repairing photos"
+                RunMode.MUSIC_REPAIR -> "Repairing music"
+                RunMode.DELETE_PROTECTED -> "Finding copy-protected songs"
                 RunMode.VIDEO -> "Converting videos"
                 RunMode.MUSIC -> "Converting music"
                 RunMode.CONVERT -> "Converting photos"
@@ -318,6 +330,9 @@ class ConversionService : Service() {
         private const val EXTRA_START = "start_ms"
         private const val EXTRA_END = "end_ms"
         private const val EXTRA_QUALITY = "quality"
+        private const val EXTRA_DRY_RUN = "dryRun"
+        private const val EXTRA_TRASH = "trash"
+        private const val EXTRA_ONLY_CHARGING = "onlyCharging"
         private const val EXTRA_DELETE = "delete"
         private const val EXTRA_ONLY_SMALLER = "only_smaller"
         private const val EXTRA_SKIP_SMALL = "skip_small"
@@ -351,6 +366,9 @@ class ConversionService : Service() {
                 .putExtra(EXTRA_SHRINK_OVERSIZED, options.shrinkOversized)
                 .putExtra(EXTRA_SKIP_EXISTING, options.skipAlreadyConverted)
                 .putExtra(EXTRA_MOTION_POLICY, options.motionPolicy.name)
+                .putExtra(EXTRA_DRY_RUN, options.dryRun)
+                .putExtra(EXTRA_TRASH, options.trashOriginals)
+                .putExtra(EXTRA_ONLY_CHARGING, options.onlyWhileCharging)
             ContextCompat.startForegroundService(context, intent)
         }
 
@@ -366,6 +384,9 @@ class ConversionService : Service() {
             motionPolicy = runCatching {
                 MotionPhotoPolicy.valueOf(getStringExtra(EXTRA_MOTION_POLICY) ?: "")
             }.getOrDefault(MotionPhotoPolicy.KEEP_VIDEO),
+            dryRun = getBooleanExtra(EXTRA_DRY_RUN, false),
+            trashOriginals = getBooleanExtra(EXTRA_TRASH, false),
+            onlyWhileCharging = getBooleanExtra(EXTRA_ONLY_CHARGING, false),
         )
     }
 }

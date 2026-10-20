@@ -40,6 +40,13 @@ object OggOpus {
     const val FLAG_FIRST = 0x02
     const val FLAG_LAST = 0x04
 
+    /**
+     * The largest packet Android's Ogg parser accepts (OggExtractor, "arbitrary limit of 16 MB",
+     * b/36592202). A bigger OpusTags packet fails the parser's set-up, and the file then reports
+     * no tracks at all — to MediaStore and every player built on it, not just to [retag]'s caller.
+     */
+    const val MAX_PACKET_BYTES = 16 * 1024 * 1024
+
     /** Copies the Ogg Opus stream [input] to [out] with its tags replaced by [comments]. */
     fun retag(input: InputStream, out: OutputStream, comments: List<Pair<String, String>>) {
         val head = readPage(input) ?: throw FormatException("empty file")
@@ -105,6 +112,34 @@ object OggOpus {
         return vendor to out
     }
 
+    /**
+     * Whether [a] and [b] carry the same OpusHead and the same audio, page for page: everything
+     * apart from the tags, which [retag] replaces, and the sequence numbers and checksums, which
+     * it renumbers. What a repair checks before a rewritten copy may replace the original.
+     */
+    fun sameAudio(a: InputStream, b: InputStream): Boolean {
+        val headA = readPage(a) ?: return false
+        val headB = readPage(b) ?: return false
+        if (!headA.body.contentEquals(headB.body)) return false
+        skipTags(a)
+        skipTags(b)
+        while (true) {
+            val pa = readPage(a)
+            val pb = readPage(b)
+            if (pa == null || pb == null) return pa == null && pb == null
+            if (pa.headerType != pb.headerType || pa.granule != pb.granule || pa.serial != pb.serial ||
+                !pa.lacing.contentEquals(pb.lacing) || !pa.body.contentEquals(pb.body)
+            ) return false
+        }
+    }
+
+    private fun skipTags(input: InputStream) {
+        while (true) {
+            val page = readPage(input) ?: throw FormatException("no OpusTags packet")
+            if (page.endsPacket) return
+        }
+    }
+
     /** The OpusTags packet: magic, vendor, then each comment as `KEY=value`. */
     fun commentPacket(vendor: String, comments: List<Pair<String, String>>): ByteArray {
         val out = ByteArrayOutputStream()
@@ -119,6 +154,40 @@ object OggOpus {
             out.write(c)
         }
         return out.toByteArray()
+    }
+
+    /** The size of [commentPacket] for these arguments, without building it. */
+    fun commentPacketSize(vendor: String, comments: List<Pair<String, String>>): Long =
+        OPUS_TAGS.size + 4L + vendor.toByteArray(Charsets.UTF_8).size + 4 +
+            comments.sumOf { (key, value) -> 4L + "$key=$value".toByteArray(Charsets.UTF_8).size }
+
+    /**
+     * [comments] with a `YEAR` added from `DATE` when there is none.
+     *
+     * `DATE` is the Vorbis name, and what other players read, but Android files it as a date that
+     * MediaStore never shows; its music library takes the year from `YEAR` alone (MetaDataUtils'
+     * parseVorbisComment). Without this every converted song lost its year in Android's apps.
+     */
+    fun withYear(comments: List<Pair<String, String>>): List<Pair<String, String>> {
+        if (comments.any { it.first.equals("YEAR", ignoreCase = true) }) return comments
+        val date = comments.firstOrNull { it.first.equals("DATE", ignoreCase = true) }?.second ?: return comments
+        val year = YEAR_PREFIX.find(date.trim())?.value ?: return comments
+        return comments + ("YEAR" to year)
+    }
+
+    private val YEAR_PREFIX = Regex("^\\d{4}(?!\\d)")
+
+    /**
+     * [pictures] with the first marked as the front cover when none is.
+     *
+     * Android takes Ogg cover art only from a front-cover picture (MetaDataUtils' extractAlbumArt
+     * skips any other type), while its MP3 reader shows whatever APIC there is. Taggers often
+     * leave the type at 0 ("other"), and some write invalid ones (255), so without this the cover
+     * shows on the MP3 and vanishes from the copy.
+     */
+    fun withFrontCover(pictures: List<Id3Tags.Picture>): List<Id3Tags.Picture> {
+        if (pictures.isEmpty() || pictures.any { it.type == Id3Tags.FRONT_COVER }) return pictures
+        return listOf(pictures[0].copy(type = Id3Tags.FRONT_COVER)) + pictures.drop(1)
     }
 
     /**

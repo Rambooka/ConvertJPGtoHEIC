@@ -6,6 +6,7 @@ import android.content.ContentUris
 import android.content.Context
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
 import androidx.core.content.ContextCompat
@@ -17,6 +18,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -38,6 +40,15 @@ enum class RunMode {
 
     /** Re-encode H.264 videos as HEVC, then offer to delete the originals. See [VideoConverter]. */
     VIDEO,
+
+    /**
+     * Fix the tags of `.opus` files the music conversion already made — the `YEAR` Android's
+     * music library needs. Rewrites the tags only; the audio is copied untouched. See [MusicRepair].
+     */
+    MUSIC_REPAIR,
+
+    /** Delete iTunes Store copy-protected songs (`.m4p`), which nothing on the phone can play or convert. */
+    DELETE_PROTECTED,
 
     /**
      * Re-encode the music library's MP3s as Opus in `.opus` files, keep each only if it is smaller,
@@ -79,6 +90,16 @@ data class RunOptions(
     val skipAlreadyConverted: Boolean,
     /** What to do with motion photos — skip them, keep the video, or drop it. */
     val motionPolicy: MotionPhotoPolicy,
+    /**
+     * Measure only: encode everything as usual, count what would be saved, then throw each copy
+     * away. Nothing is published and nothing deleted. Photos run as [RunMode.DRY_RUN]; videos and
+     * music take this flag.
+     */
+    val dryRun: Boolean = false,
+    /** Move originals to the trash (recoverable for 30 days) rather than deleting them. */
+    val trashOriginals: Boolean = false,
+    /** Hold the run while the phone is not charging. */
+    val onlyWhileCharging: Boolean = false,
 )
 
 data class RunProgress(
@@ -109,6 +130,8 @@ data class RunProgress(
     /** Repair runs only: photos fixed so far, by what was wrong with them. */
     val repairedDates: Int = 0,
     val repairedRotations: Int = 0,
+    /** Set while the run is held: not charging, or the phone is too hot. */
+    val pausedReason: String? = null,
     /** Repair runs only: which step is running, since each counts different things. */
     val repairPhase: RepairPhase? = null,
     /** Repair runs only: found to need a fix but waiting for the user to allow it. */
@@ -213,6 +236,8 @@ data class RunReport(
     val skippedTooSmallBytes: Long = 0,
     /** Converted, but shrunk to fit the encoder — so the HEIC is lower resolution than the source. */
     val downscaledToFit: Int = 0,
+    /** PNGs whose transparent areas were filled white: HEIC carries no transparency here. */
+    val flattenedTransparency: Int = 0,
     /** Sample of failure messages, capped — see [failureCount] for the real total. */
     val failures: List<FailedPhoto> = emptyList(),
     val failureCount: Int = 0,
@@ -242,6 +267,20 @@ data class RunReport(
     val musicNotSmaller: Int = 0,
     /** Music runs only: earlier `.ogg` copies renamed to `.opus`. */
     val musicRenamed: Int = 0,
+    /** Copy-protected deletion runs only: `.m4p` songs found; [deletedOriginals] is how many went. */
+    val protectedFound: Int = 0,
+    /** Music repair runs only: songs given a year the music library now shows. */
+    val musicYearsFixed: Int = 0,
+    /** Music repair runs only: no year anywhere in the tags to give them. */
+    val musicNoDate: Int = 0,
+    /** A measuring run: the tallies say what a real run would do, and nothing was changed. */
+    val dryRun: Boolean = false,
+    /** [deletedOriginals] went to the trash, not to deletion. */
+    val trashed: Boolean = false,
+    /** Clean-up runs only: leftovers found, by kind; [deletedOriginals] is how many went. */
+    val leftoverJpgs: Int = 0,
+    val leftoverVideos: Int = 0,
+    val leftoverMp3s: Int = 0,
 ) {
     /**
      * Records a whole-run failure with no single file behind it — no encoder, storage full.
@@ -249,7 +288,7 @@ data class RunReport(
      * Kept in the same list as the per-photo ones (with an empty [FailedPhoto.uri]) so the report
      * has one place to look; the UI shows these as a plain reason, with no view/delete buttons.
      */
-    fun withFailure(reason: String): RunReport = copy(
+    fun withFailure(reason: String): RunReport = also { RunLog.line("FAILED (run) · $reason") }.copy(
         failures = if (failures.size < MAX_RETAINED_FAILURES) {
             failures + FailedPhoto(Uri.EMPTY, "", 0, reason)
         } else {
@@ -266,7 +305,8 @@ data class RunReport(
      * would build thousands of entries the UI never shows. Only a sample is kept; [failureCount]
      * stays exact.
      */
-    fun withFailure(photo: SourcePhoto, reason: String): RunReport = copy(
+    fun withFailure(photo: SourcePhoto, reason: String): RunReport =
+        also { RunLog.line("FAILED ${photo.relativePath}${photo.displayName} · $reason") }.copy(
         failures = if (failures.size < MAX_RETAINED_FAILURES) {
             failures + FailedPhoto(photo.uri, photo.displayName, photo.sizeBytes, reason)
         } else {
@@ -276,7 +316,8 @@ data class RunReport(
     )
 
     /** As [withFailure] for a photo, for files that are not conversion sources (a repair). */
-    fun withFailure(uri: Uri, name: String, sizeBytes: Long, reason: String): RunReport = copy(
+    fun withFailure(uri: Uri, name: String, sizeBytes: Long, reason: String): RunReport =
+        also { RunLog.line("FAILED $name · $reason") }.copy(
         failures = if (failures.size < MAX_RETAINED_FAILURES) {
             failures + FailedPhoto(uri, name, sizeBytes, reason)
         } else {
@@ -365,6 +406,7 @@ class ConversionEngine private constructor(context: Context) {
     private val videoStaging = File(app.cacheDir, "video-staging")
     private val musicConverter = MusicConverter(app)
     private val musicStaging = File(app.cacheDir, "music-staging")
+    private val musicRepairer = MusicRepair(app.contentResolver, musicStaging)
     /**
      * The handler is not optional. A revoked photo permission makes `ContentResolver.query` throw
      * SecurityException, and an uncaught throw from `launch` reaches the thread's default handler
@@ -432,6 +474,9 @@ class ConversionEngine private constructor(context: Context) {
 
         /** A dialog is on screen; do not raise a second one for the same batch. */
         var inFlight = false
+
+        /** When the dialog in flight was launched ([SystemClock.elapsedRealtime]). */
+        var launchedAt = 0L
         val outcome = CompletableDeferred<Boolean>()
     }
 
@@ -475,6 +520,8 @@ class ConversionEngine private constructor(context: Context) {
         if (isBusy || hasPendingDeletion) return false
         cancelRequested = false
         currentMode = mode
+        currentOptions = options
+        RunLog.start(app, mode, options)
         directWriteWorks = true
         directWriteProven = false
         // See the note in scan(): the observer must never replay a stale Finished.
@@ -483,6 +530,8 @@ class ConversionEngine private constructor(context: Context) {
             when (mode) {
                 RunMode.CLEAN_UP -> cleanUp(options)
                 RunMode.REPAIR -> repair()
+                RunMode.MUSIC_REPAIR -> repairMusic()
+                RunMode.DELETE_PROTECTED -> deleteProtected()
                 RunMode.VIDEO -> convertVideos(options)
                 RunMode.MUSIC -> convertMusic(options)
                 else -> convert(mode, options)
@@ -514,14 +563,14 @@ class ConversionEngine private constructor(context: Context) {
         )
         synchronized(deletionLock) { pendingDeletion?.outcome?.complete(false) }
         _deletionRequest.value = null
-        _state.value = UiState.Finished(failed)
+        finish(failed)
     }
 
     // region conversion
 
     private suspend fun convert(mode: RunMode, options: RunOptions) {
         if (!EncoderSupport.hasHevcEncoder) {
-            _state.value = UiState.Finished(RunReport(mode).withFailure(NO_ENCODER))
+            finish(RunReport(mode).withFailure(NO_ENCODER))
             return
         }
 
@@ -530,7 +579,7 @@ class ConversionEngine private constructor(context: Context) {
         // instead of producing thousands of identical errors.
         val free = encoder.freeStagingBytes()
         if (free in 0 until MIN_FREE_SPACE_BYTES) {
-            _state.value = UiState.Finished(
+            finish(
                 RunReport(mode).withFailure(
                     "Only ${free / (1024 * 1024)} MB of storage free. Free up space, or use " +
                         "\"Clean up leftovers\" to remove JPGs that already have a HEIC."
@@ -541,7 +590,7 @@ class ConversionEngine private constructor(context: Context) {
 
         val photos = repository.queryJpgs(options.startMs, options.endMs)
         if (photos.isEmpty()) {
-            _state.value = UiState.Finished(RunReport(mode))
+            finish(RunReport(mode))
             return
         }
 
@@ -561,6 +610,7 @@ class ConversionEngine private constructor(context: Context) {
         try {
             for ((index, photo) in photos.withIndex()) {
                 if (cancelRequested) break
+                holdIfNeeded(options)
                 _state.value = UiState.Working(
                     mode,
                     RunProgress(
@@ -660,6 +710,14 @@ class ConversionEngine private constructor(context: Context) {
                         forEncoding, rotation ?: 0, tally, toDelete)
                 }
 
+                // A stuck encode was abandoned. End the run here rather than stall on every photo
+                // after it; what was converted is kept and its originals are still offered.
+                if (encoder.wedged) {
+                    tally = tally.withFailure(ENCODER_STALLED)
+                    endedEarly = true
+                    break
+                }
+
                 if (deleteAsWeGo && shouldFlushDeletions(toDelete.size, index)) {
                     _state.value = UiState.AwaitingDeletion(
                         mode,
@@ -697,7 +755,7 @@ class ConversionEngine private constructor(context: Context) {
             if (!answer.granted) declined = true
         }
 
-        _state.value = UiState.Finished(
+        finish(
             tally.copy(
                 cancelled = cancelRequested || endedEarly,
                 deletedOriginals = deletedTotal,
@@ -778,9 +836,11 @@ class ConversionEngine private constructor(context: Context) {
         mirrored: Boolean,
         outputBytes: Long,
         downscaled: Boolean,
+        flattenedTransparency: Boolean = false,
     ): RunReport = tally.copy(
         converted = tally.converted + 1,
         downscaledToFit = tally.downscaledToFit + if (downscaled) 1 else 0,
+        flattenedTransparency = tally.flattenedTransparency + if (flattenedTransparency) 1 else 0,
         originalBytes = tally.originalBytes + photo.sizeBytes,
         heicBytes = tally.heicBytes + outputBytes,
         // The motion subset of the byte totals; stills fall out as the remainder in the report.
@@ -838,6 +898,7 @@ class ConversionEngine private constructor(context: Context) {
             }
             return countConverted(
                 tally, photo, metadata, motionOutcome, mirrored, success.bytes, success.downscaled,
+                success.flattenedTransparency,
             )
         } finally {
             success.file?.delete()
@@ -870,6 +931,9 @@ class ConversionEngine private constructor(context: Context) {
         var failure: String? = null
         var written = 0L
         var downscaled = false
+        var encodedWidth = 0
+        var encodedHeight = 0
+        var flattened = false
 
         val published = repository.publishHeic(photo) { uri ->
             when (
@@ -885,6 +949,9 @@ class ConversionEngine private constructor(context: Context) {
                 is EncodeResult.Success -> {
                     written = result.bytes
                     downscaled = result.downscaled
+                    encodedWidth = result.width
+                    encodedHeight = result.height
+                    flattened = result.flattenedTransparency
                     result.bytes
                 }
             }
@@ -906,8 +973,14 @@ class ConversionEngine private constructor(context: Context) {
             return tally.copy(skippedNotSmaller = tally.skippedNotSmaller + 1)
         }
 
+        // The original is about to be offered for deletion, so the copy has to decode first.
+        encoder.verifyWritten(published.uri, encodedWidth, encodedHeight)?.let { problem ->
+            repository.discard(published.uri)
+            return tally.withFailure(photo, "$problem; the original was left alone")
+        }
+
         toDelete += photo.uri
-        val counted = countConverted(tally, photo, metadata, motionOutcome, mirrored, written, downscaled)
+        val counted = countConverted(tally, photo, metadata, motionOutcome, mirrored, written, downscaled, flattened)
         return if (published.datesApplied) {
             counted
         } else {
@@ -980,26 +1053,44 @@ class ConversionEngine private constructor(context: Context) {
 
     // region clean up
 
-    /** Removes JPGs that already have a HEIC beside them — the leftovers of an interrupted run. */
+    /**
+     * Removes the leftovers of interrupted runs, each original only where its converted copy is
+     * already beside it: JPGs and PNGs in the range with a HEIC, videos in the range with an
+     * `_HEVC.mp4` (which then takes the original's name, as the video run does), and songs of any
+     * date — music has no capture date — with their `.opus`.
+     */
     private suspend fun cleanUp(options: RunOptions) {
-        val stranded = repository.findStrandedOriginals(DateRange(options.startMs, options.endMs))
+        val range = DateRange(options.startMs, options.endMs)
+        val stranded = repository.findStrandedOriginals(range)
+        val strandedVideos = if (cancelRequested) emptyList() else repository.findStrandedVideos(range)
+        val strandedMp3s = if (cancelRequested) emptyList() else repository.findStrandedMp3s()
         if (cancelRequested) {
-            _state.value = UiState.Finished(RunReport(RunMode.CLEAN_UP, cancelled = true))
+            finish(RunReport(RunMode.CLEAN_UP, cancelled = true))
             return
         }
-        if (stranded.isEmpty()) {
-            _state.value = UiState.Finished(RunReport(RunMode.CLEAN_UP))
+        val total = stranded.size + strandedVideos.size + strandedMp3s.size
+        if (total == 0) {
+            finish(RunReport(RunMode.CLEAN_UP))
             return
         }
 
-        _state.value = UiState.AwaitingDeletion(
-            RunMode.CLEAN_UP, 0, stranded.size, stranded.size,
+        _state.value = UiState.AwaitingDeletion(RunMode.CLEAN_UP, 0, total, total)
+        val answer = confirmDeletion(
+            stranded.map { it.uri } + strandedVideos.map { it.first.uri } + strandedMp3s.map { it.uri }
         )
-        val answer = confirmDeletion(stranded.map { it.uri })
-        _state.value = UiState.Finished(
+        // Only once its original is really gone may a copy take the original's name.
+        val gone = answer.accepted.toHashSet()
+        for ((video, copy) in strandedVideos) {
+            if (video.uri in gone) repository.renameVideo(copy, video.finalName)
+        }
+        finish(
             RunReport(
                 RunMode.CLEAN_UP,
-                originalBytes = stranded.sumOf { it.sizeBytes },
+                originalBytes = stranded.sumOf { it.sizeBytes } + strandedVideos.sumOf { it.first.sizeBytes } +
+                    strandedMp3s.sumOf { it.sizeBytes },
+                leftoverJpgs = stranded.size,
+                leftoverVideos = strandedVideos.size,
+                leftoverMp3s = strandedMp3s.size,
                 deletedOriginals = answer.deleted,
                 deletionOutcome = if (answer.granted) {
                     DeletionOutcome.COMPLETED
@@ -1063,19 +1154,19 @@ class ConversionEngine private constructor(context: Context) {
     private suspend fun convertVideos(options: RunOptions) {
         val mode = RunMode.VIDEO
         if (!EncoderSupport.hasHevcEncoder) {
-            _state.value = UiState.Finished(RunReport(mode).withFailure(NO_ENCODER))
+            finish(RunReport(mode).withFailure(NO_ENCODER))
             return
         }
         val videos = repository.queryVideos(options.startMs, options.endMs)
         if (videos.isEmpty()) {
-            _state.value = UiState.Finished(RunReport(mode))
+            finish(RunReport(mode))
             return
         }
         if (!videoStaging.isDirectory) videoStaging.mkdirs()
         videoStaging.listFiles()?.forEach { it.delete() }
 
         var tally = RunReport(mode)
-        val deleteAsWeGo = options.deleteOriginals
+        val deleteAsWeGo = options.deleteOriginals && !options.dryRun
         /** Converted but not yet offered for deletion: original URI → (new URI, original name). */
         val waiting = LinkedHashMap<Uri, Pair<Uri, String>>()
         var deletedTotal = 0
@@ -1122,6 +1213,7 @@ class ConversionEngine private constructor(context: Context) {
 
         for ((index, video) in videos.withIndex()) {
             if (cancelRequested) break
+            holdIfNeeded(options)
             progress(index, video, 0f)
             try {
                 when (val check = videoConverter.check(video)) {
@@ -1147,8 +1239,9 @@ class ConversionEngine private constructor(context: Context) {
         if (deleteAsWeGo && !declined) flushDeletions(videos.size)
         videoStaging.listFiles()?.forEach { it.delete() }
 
-        _state.value = UiState.Finished(
+        finish(
             tally.copy(
+                dryRun = options.dryRun,
                 cancelled = cancelRequested,
                 deletedOriginals = deletedTotal,
                 deletionOutcome = when {
@@ -1159,6 +1252,13 @@ class ConversionEngine private constructor(context: Context) {
             )
         )
     }
+
+    /** A dry run's tally for a copy that would have been kept: counted, never published. */
+    private fun countMeasured(tally: RunReport, originalBytes: Long, outputBytes: Long): RunReport = tally.copy(
+        converted = tally.converted + 1,
+        originalBytes = tally.originalBytes + originalBytes,
+        heicBytes = tally.heicBytes + outputBytes,
+    )
 
     private suspend fun convertOneVideo(
         options: RunOptions,
@@ -1190,9 +1290,10 @@ class ConversionEngine private constructor(context: Context) {
             if (options.onlyIfSmaller && bytes >= video.sizeBytes) {
                 return tally.copy(skippedNotSmaller = tally.skippedNotSmaller + 1)
             }
+            if (options.dryRun) return countMeasured(tally, video.sizeBytes, bytes)
             val published = repository.publishVideo(video, staged)
                 ?: return tally.withFailure(video.uri, video.displayName, video.sizeBytes, "could not be saved to the gallery")
-            if (options.deleteOriginals) waiting[video.uri] = published to video.displayName
+            if (options.deleteOriginals) waiting[video.uri] = published to video.finalName
             return tally.copy(
                 converted = tally.converted + 1,
                 originalBytes = tally.originalBytes + video.sizeBytes,
@@ -1217,37 +1318,49 @@ class ConversionEngine private constructor(context: Context) {
     private suspend fun convertMusic(options: RunOptions) {
         val mode = RunMode.MUSIC
         if (!EncoderSupport.hasOpusEncoder) {
-            _state.value = UiState.Finished(RunReport(mode).withFailure(NO_OPUS_ENCODER))
+            finish(RunReport(mode).withFailure(NO_OPUS_ENCODER))
             return
         }
         // Copies made before the switch from `.ogg` first, so they count as already converted.
         val renamed = repository.renameOwnOggsToOpus()
-        val tracks = repository.queryMusicMp3s()
+        val tracks = repository.queryMusicToConvert()
         if (tracks.isEmpty()) {
-            _state.value = UiState.Finished(RunReport(mode, musicRenamed = renamed))
+            finish(RunReport(mode, musicRenamed = renamed))
             return
         }
         if (!musicStaging.isDirectory) musicStaging.mkdirs()
         musicStaging.listFiles()?.forEach { it.delete() }
 
         var tally = RunReport(mode, musicRenamed = renamed)
-        val deleteAsWeGo = options.deleteOriginals
+        val deleteAsWeGo = options.deleteOriginals && !options.dryRun
         val waiting = ArrayList<Uri>()
         var deletedTotal = 0
         var declined = false
 
+        // Pace by bytes: a long song takes proportionally longer.
         val totalMb = (tracks.sumOf { it.sizeBytes } / MB).toInt().coerceAtLeast(1)
         val eta = Eta(totalMb)
         var doneBytes = 0L
+        var completed = 0
 
-        fun progress(index: Int, track: SourceTrack, fraction: Float) {
-            val doneMb = ((doneBytes + (track.sizeBytes * fraction).toLong()) / MB).toInt()
+        // Songs are encoded [musicWorkers] at a time: the work is CPU-bound and single-threaded
+        // per song, and the phone has cores to spare. Everything the workers share — the tally,
+        // the waiting list, what is in flight — is touched only under [stateLock].
+        val stateLock = Any()
+        val inFlight = java.util.TreeMap<Int, Pair<SourceTrack, Float>>()
+
+        /** The progress for what is going now; call under [stateLock]. */
+        fun render() {
+            val names = inFlight.values.joinToString(" · ") { it.first.displayName }
+            val fraction = if (inFlight.isEmpty()) 0f else inFlight.values.map { it.second }.average().toFloat()
+            val doneMb = ((doneBytes + inFlight.values.sumOf { (t, f) -> (t.sizeBytes * f).toLong() }) / MB).toInt()
+            val held = (_state.value as? UiState.Working)?.progress?.pausedReason
             _state.value = UiState.Working(
                 mode,
                 RunProgress(
-                    done = index,
+                    done = completed,
                     total = tracks.size,
-                    currentName = track.displayName,
+                    currentName = names,
                     converted = tally.converted,
                     savedBytes = tally.savedBytes,
                     failures = tally.failureCount,
@@ -1256,6 +1369,7 @@ class ConversionEngine private constructor(context: Context) {
                     pendingDeletions = waiting.size,
                     remainingMs = eta.remainingMs(doneMb),
                     itemFraction = fraction,
+                    pausedReason = held,
                 ),
             )
         }
@@ -1269,25 +1383,64 @@ class ConversionEngine private constructor(context: Context) {
             if (!answer.granted) declined = true
         }
 
-        for ((index, track) in tracks.withIndex()) {
-            if (cancelRequested) break
-            progress(index, track, 0f)
-            try {
-                tally = convertOneTrack(options, track, tally, waiting) { progress(index, track, it) }
-            } finally {
-                doneBytes += track.sizeBytes
+        // In batches, so the delete prompt comes between batches with every worker idle.
+        var next = 0
+        while (next < tracks.size && !cancelRequested && !declined) {
+            val end = minOf(next + MUSIC_DELETE_EVERY, tracks.size)
+            val cursor = java.util.concurrent.atomic.AtomicInteger(next)
+            var lowSpace = false
+            kotlinx.coroutines.coroutineScope {
+                repeat(musicWorkers()) {
+                    launch(Dispatchers.Default) {
+                        while (!cancelRequested) {
+                            holdIfNeeded(options)
+                            if (cancelRequested || (lowSpace && deleteAsWeGo)) break
+                            // Every index taken is finished: nothing below `cursor` is ever skipped.
+                            val i = cursor.getAndIncrement()
+                            if (i >= end) break
+                            val track = tracks[i]
+                            synchronized(stateLock) {
+                                inFlight[i] = track to 0f
+                                render()
+                            }
+                            val outcome = try {
+                                prepareTrack(track) { f ->
+                                    synchronized(stateLock) {
+                                        inFlight[i] = track to f
+                                        render()
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Could not convert ${track.displayName}", e)
+                                TrackOutcome.Failed("${e.javaClass.simpleName}: ${e.message ?: "no detail"}")
+                            }
+                            synchronized(stateLock) {
+                                tally = commitTrack(options, track, outcome, tally, waiting)
+                                doneBytes += track.sizeBytes
+                                completed++
+                                inFlight.remove(i)
+                                if (deleteAsWeGo && waiting.isNotEmpty() &&
+                                    encoder.freeStagingBytes() in 0 until LOW_SPACE_THRESHOLD_BYTES
+                                ) lowSpace = true
+                                render()
+                            }
+                        }
+                    }
+                }
             }
-            if (deleteAsWeGo && !declined &&
-                (waiting.size >= MUSIC_DELETE_EVERY || (waiting.isNotEmpty() && encoder.freeStagingBytes() in 0 until LOW_SPACE_THRESHOLD_BYTES))
+            next = cursor.get().coerceAtMost(end)
+            if (deleteAsWeGo && !declined && waiting.isNotEmpty() &&
+                (waiting.size >= MUSIC_DELETE_EVERY || lowSpace || next >= tracks.size)
             ) {
-                flushDeletions(index + 1)
+                flushDeletions(next)
             }
         }
         if (deleteAsWeGo && !declined) flushDeletions(tracks.size)
         musicStaging.listFiles()?.forEach { it.delete() }
 
-        _state.value = UiState.Finished(
+        finish(
             tally.copy(
+                dryRun = options.dryRun,
                 cancelled = cancelRequested,
                 deletedOriginals = deletedTotal,
                 deletionOutcome = when {
@@ -1299,43 +1452,81 @@ class ConversionEngine private constructor(context: Context) {
         )
     }
 
-    private fun convertOneTrack(
-        options: RunOptions,
-        track: SourceTrack,
-        tally: RunReport,
-        waiting: MutableList<Uri>,
-        onProgress: (Float) -> Unit,
-    ): RunReport {
-        // Converted by an earlier run, whose original the user chose to keep.
-        if (repository.opusExistsBeside(track)) return tally.copy(skippedExisting = tally.skippedExisting + 1)
+    /**
+     * How many songs to encode at once. A song's thread spends most of its time waiting on the
+     * codec hand-overs (each is a round trip to the codec's process, ~1.5 ms, tens of thousands a
+     * song), not computing, so the count is set by cores with a margin, not by half of them.
+     */
+    private fun musicWorkers(): Int =
+        minOf(MUSIC_WORKERS, Runtime.getRuntime().availableProcessors() - 2).coerceAtLeast(1)
+
+    /** What became of one song's encode, before anything shared is touched. */
+    private sealed interface TrackOutcome {
+        /** An `.opus` is already beside it, from an earlier run whose original the user kept. */
+        data object AlreadyConverted : TrackOutcome
+        data class Failed(val reason: String) : TrackOutcome
+        /** Came out no smaller than the original; a bigger copy would defeat the purpose. */
+        data object NotSmaller : TrackOutcome
+        /** Encoded, checked, and waiting in [staged] to be published. */
+        data class Encoded(val staged: File, val bytes: Long) : TrackOutcome
+    }
+
+    /** The part of a song's conversion that needs nothing shared: safe to run several at once. */
+    private fun prepareTrack(track: SourceTrack, onProgress: (Float) -> Unit): TrackOutcome {
+        if (repository.opusExistsBeside(track)) return TrackOutcome.AlreadyConverted
         val free = encoder.freeStagingBytes()
         if (free in 0 until track.sizeBytes * 3 + MIN_FREE_SPACE_BYTES) {
-            return tally.withFailure(track.uri, track.displayName, track.sizeBytes,
-                "not enough free space to convert it (${free / MB} MB free)")
+            return TrackOutcome.Failed("not enough free space to convert it (${free / MB} MB free)")
         }
-
         val stamp = System.nanoTime()
         val scratch = File(musicStaging, "$stamp-raw.opus")
         val staged = File(musicStaging, "$stamp.opus")
-        try {
-            val bytes = when (val outcome = musicConverter.convert(track, staged, scratch, onProgress)) {
-                is MusicConverter.Outcome.Failed ->
-                    return tally.withFailure(track.uri, track.displayName, track.sizeBytes, outcome.reason)
-                is MusicConverter.Outcome.Converted -> outcome.bytes
-            }
-            // Always, whatever the photo option says: a bigger copy would defeat the purpose.
-            if (bytes >= track.sizeBytes) return tally.copy(musicNotSmaller = tally.musicNotSmaller + 1)
-            repository.publishOpus(track, staged)
-                ?: return tally.withFailure(track.uri, track.displayName, track.sizeBytes, "could not be saved to the music library")
-            if (options.deleteOriginals) waiting += track.uri
-            return tally.copy(
-                converted = tally.converted + 1,
-                originalBytes = tally.originalBytes + track.sizeBytes,
-                heicBytes = tally.heicBytes + bytes,
-            )
+        val outcome = try {
+            musicConverter.convert(track, staged, scratch, onProgress)
         } finally {
             scratch.delete()
-            staged.delete()
+        }
+        return when (outcome) {
+            is MusicConverter.Outcome.Failed -> {
+                staged.delete()
+                TrackOutcome.Failed(outcome.reason)
+            }
+            is MusicConverter.Outcome.Converted ->
+                if (outcome.bytes >= track.sizeBytes) {
+                    staged.delete()
+                    TrackOutcome.NotSmaller
+                } else {
+                    TrackOutcome.Encoded(staged, outcome.bytes)
+                }
+        }
+    }
+
+    /** Publishes a prepared song and counts it; the one part done under the lock. */
+    private fun commitTrack(
+        options: RunOptions,
+        track: SourceTrack,
+        outcome: TrackOutcome,
+        tally: RunReport,
+        waiting: MutableList<Uri>,
+    ): RunReport = when (outcome) {
+        TrackOutcome.AlreadyConverted -> tally.copy(skippedExisting = tally.skippedExisting + 1)
+        is TrackOutcome.Failed -> tally.withFailure(track.uri, track.displayName, track.sizeBytes, outcome.reason)
+        TrackOutcome.NotSmaller -> tally.copy(musicNotSmaller = tally.musicNotSmaller + 1)
+        is TrackOutcome.Encoded -> try {
+            if (options.dryRun) {
+                countMeasured(tally, track.sizeBytes, outcome.bytes)
+            } else if (repository.publishOpus(track, outcome.staged) == null) {
+                tally.withFailure(track.uri, track.displayName, track.sizeBytes, "could not be saved to the music library")
+            } else {
+                if (options.deleteOriginals) waiting += track.uri
+                tally.copy(
+                    converted = tally.converted + 1,
+                    originalBytes = tally.originalBytes + track.sizeBytes,
+                    heicBytes = tally.heicBytes + outcome.bytes,
+                )
+            }
+        } finally {
+            outcome.staged.delete()
         }
     }
 
@@ -1352,7 +1543,7 @@ class ConversionEngine private constructor(context: Context) {
         val mode = RunMode.REPAIR
         val rows = repository.queryHeics()
         if (rows.isEmpty()) {
-            _state.value = UiState.Finished(RunReport(mode))
+            finish(RunReport(mode))
             return
         }
         val knownTimes = PhotoRepository.withTwinTimes(
@@ -1454,12 +1645,143 @@ class ConversionEngine private constructor(context: Context) {
         val verified = confirmRepairs(repaired) { done, total, eta ->
             progress(RepairPhase.REFRESHING, done, total, "", eta)
         }
-        _state.value = UiState.Finished(
+        finish(
             tally.copy(
                 cancelled = cancelRequested,
                 repairedDates = verified.dates,
                 repairedRotations = verified.rotations,
                 repairUnverified = verified.unverified,
+            )
+        )
+    }
+
+    /**
+     * Gives converted songs the `YEAR` tag Android's music library needs, as [repair] does dates
+     * for photos: fix what the app owns as it goes, ask once for the rest, then confirm MediaStore
+     * shows the year — rescanning whatever it has not picked up on its own.
+     */
+    private suspend fun repairMusic() {
+        val mode = RunMode.MUSIC_REPAIR
+        val rows = repository.queryOpus()
+        if (rows.isEmpty()) {
+            finish(RunReport(mode))
+            return
+        }
+
+        var tally = RunReport(mode)
+        val repaired = ArrayList<OpusRow>()
+        val needsAccess = ArrayList<Pair<OpusRow, MusicRepair.Diagnosis.Needs>>()
+
+        fun progress(phase: RepairPhase, done: Int, total: Int, name: String, eta: Eta) {
+            _state.value = UiState.Working(
+                mode,
+                RunProgress(
+                    done = done,
+                    total = total,
+                    currentName = name,
+                    failures = tally.failureCount,
+                    repairedDates = repaired.size,
+                    repairPhase = phase,
+                    awaitingPermission = needsAccess.size,
+                    remainingMs = eta.remainingMs(done),
+                ),
+            )
+        }
+
+        fun applyOne(row: OpusRow, fix: MusicRepair.Diagnosis.Needs) {
+            when (val outcome = musicRepairer.apply(row.uri, row.displayName, fix)) {
+                MusicRepair.Outcome.Repaired -> repaired += row
+                is MusicRepair.Outcome.Failed -> {
+                    Log.i(TAG, "Could not repair ${row.displayName}: ${outcome.reason}")
+                    tally = tally.withFailure(row.uri, row.displayName, row.sizeBytes, outcome.reason)
+                }
+            }
+        }
+
+        val checking = Eta(rows.size)
+        for ((index, row) in rows.withIndex()) {
+            if (cancelRequested) break
+            progress(RepairPhase.CHECKING, index, rows.size, row.displayName, checking)
+            when (val diagnosis = musicRepairer.diagnose(row.uri)) {
+                MusicRepair.Diagnosis.Fine -> Unit
+                MusicRepair.Diagnosis.NoDate -> tally = tally.copy(musicNoDate = tally.musicNoDate + 1)
+                is MusicRepair.Diagnosis.Cannot -> {
+                    Log.i(TAG, "Cannot repair ${row.displayName}: ${diagnosis.reason}")
+                    tally = tally.withFailure(row.uri, row.displayName, row.sizeBytes, diagnosis.reason)
+                }
+                is MusicRepair.Diagnosis.Needs -> try {
+                    applyOne(row, diagnosis)
+                } catch (_: SecurityException) {
+                    needsAccess += row to diagnosis
+                }
+            }
+            tally = tally.copy(repairChecked = index + 1)
+        }
+
+        if (needsAccess.isNotEmpty() && !cancelRequested) {
+            _state.value = UiState.AwaitingDeletion(mode, tally.repairChecked, rows.size, needsAccess.size)
+            val answer = confirmConsent(needsAccess.map { it.first.uri }, ConsentKind.MODIFY)
+            val allowed = answer.accepted.toHashSet()
+            var declined = 0
+            val writing = Eta(needsAccess.size)
+            for ((index, pair) in needsAccess.withIndex()) {
+                if (cancelRequested) break
+                val (row, fix) = pair
+                progress(RepairPhase.WRITING, index, needsAccess.size, row.displayName, writing)
+                if (row.uri !in allowed) {
+                    declined++
+                    continue
+                }
+                try {
+                    applyOne(row, fix)
+                } catch (_: SecurityException) {
+                    tally = tally.withFailure(row.uri, row.displayName, row.sizeBytes, "access was not granted")
+                }
+            }
+            tally = tally.copy(repairDeclined = declined)
+        }
+
+        // MediaProvider rescans a file that grew when its writer closes it, mostly; anything not
+        // yet showing a year goes to the scanner explicitly.
+        var years = repository.musicYears(repaired.map { it.id })
+        val stale = repaired.filter { years[it.id] == null }
+        if (stale.isNotEmpty() && !cancelRequested) {
+            val eta = Eta(stale.size)
+            progress(RepairPhase.REFRESHING, 0, stale.size, "", eta)
+            repository.scanFiles(stale.mapNotNull { it.path }) { scanned ->
+                if (cancelRequested) return@scanFiles false
+                progress(RepairPhase.REFRESHING, scanned, stale.size, "", eta)
+                true
+            }
+            years = repository.musicYears(repaired.map { it.id })
+        }
+        val showing = repaired.count { years[it.id] != null }
+        finish(
+            tally.copy(
+                cancelled = cancelRequested,
+                musicYearsFixed = showing,
+                repairUnverified = repaired.size - showing,
+            )
+        )
+    }
+
+    /** Offers every copy-protected `.m4p` for deletion, through the system's own confirmation. */
+    private suspend fun deleteProtected() {
+        val mode = RunMode.DELETE_PROTECTED
+        val songs = repository.queryProtectedSongs()
+        if (songs.isEmpty() || cancelRequested) {
+            finish(RunReport(mode, cancelled = cancelRequested))
+            return
+        }
+        _state.value = UiState.AwaitingDeletion(mode, 0, songs.size, songs.size)
+        val answer = confirmDeletion(songs.map { it.uri })
+        finish(
+            RunReport(
+                mode,
+                protectedFound = songs.size,
+                originalBytes = songs.sumOf { it.sizeBytes },
+                deletedOriginals = answer.deleted,
+                deletionOutcome = if (answer.granted) DeletionOutcome.COMPLETED else DeletionOutcome.DECLINED,
             )
         )
     }
@@ -1561,6 +1883,82 @@ class ConversionEngine private constructor(context: Context) {
         _deletionRequest.value = batch
     }
 
+    /**
+     * Holds the run while [holdReason] gives one, showing why, and returns once it does not — or at
+     * once on cancel. Called between items, so a held run finishes the item it was on.
+     */
+    private suspend fun holdIfNeeded(options: RunOptions) {
+        var held = false
+        while (!cancelRequested) {
+            val reason = holdReason(options)
+            if (reason == null) {
+                if (held) clearHold()
+                return
+            }
+            held = true
+            val s = _state.value
+            if (s is UiState.Working && s.progress.pausedReason != reason) {
+                _state.value = s.copy(progress = s.progress.copy(pausedReason = reason))
+                RunLog.line("held: $reason")
+            }
+            delay(HOLD_POLL_MS)
+        }
+    }
+
+    private fun clearHold() {
+        val s = _state.value
+        if (s is UiState.Working && s.progress.pausedReason != null) {
+            _state.value = s.copy(progress = s.progress.copy(pausedReason = null))
+        }
+        RunLog.line("resumed")
+    }
+
+    /** Why a run should wait right now, or null. Heat is always respected; the charger is an option. */
+    private fun holdReason(options: RunOptions): String? {
+        if (options.onlyWhileCharging) {
+            val battery = app.getSystemService(android.os.BatteryManager::class.java)
+            if (battery != null && !battery.isCharging) return "waiting for the charger"
+        }
+        val power = app.getSystemService(android.os.PowerManager::class.java)
+        if (power != null && power.currentThermalStatus >= android.os.PowerManager.THERMAL_STATUS_SEVERE) {
+            return "letting the phone cool down"
+        }
+        return null
+    }
+
+    /** The options of the run going now, for the parts of it that happen outside its loop. */
+    @Volatile
+    private var currentOptions: RunOptions? = null
+
+    /** The run is over: record it in the run log, then publish it. */
+    private fun finish(report: RunReport) {
+        val full = report.copy(trashed = currentOptions?.trashOriginals == true && report.deletedOriginals > 0)
+        RunLog.finish(full)
+        _state.value = UiState.Finished(full)
+    }
+
+    /**
+     * Raises the confirmation again when the one on screen was dismissed without an answer.
+     *
+     * Locking the screen while MediaProvider's dialog is up closes it and sends no result, so the
+     * batch stayed marked in flight and was never asked again — the run sat waiting for good. The
+     * Activity calls this when it is back in front, which no system dialog can be while it is, and
+     * from its "Show the prompt again" button ([force]).
+     *
+     * Not forced, a dialog launched in the last [ABANDONED_AFTER_MS] is left alone: an answer is
+     * delivered just before the Activity resumes, and the next batch's dialog is launched in that
+     * same moment, so at resume it is in flight for real and raising it again would show it twice.
+     */
+    fun reraiseAbandonedPrompt(force: Boolean = false) {
+        synchronized(deletionLock) {
+            val request = pendingDeletion ?: return
+            if (!request.inFlight) return@synchronized
+            if (!force && SystemClock.elapsedRealtime() - request.launchedAt < ABANDONED_AFTER_MS) return
+            request.inFlight = false
+        }
+        requestNextDeletionBatch()
+    }
+
     fun createDeleteIntentSender(uris: List<Uri>) =
         MediaStore.createDeleteRequest(app.contentResolver, uris).intentSender
 
@@ -1595,16 +1993,23 @@ class ConversionEngine private constructor(context: Context) {
         return ManualDateResult.Done(taken)
     }
 
-    /** The system dialog for [request] — delete, or allow the app to modify. */
+    /** The system dialog for [request] — delete (or trash, if the run asked for that), or allow the app to modify. */
     fun createConsentIntentSender(request: DeletionRequest) = when (request.kind) {
-        ConsentKind.DELETE -> MediaStore.createDeleteRequest(app.contentResolver, request.uris)
+        ConsentKind.DELETE ->
+            if (currentOptions?.trashOriginals == true) MediaStore.createTrashRequest(app.contentResolver, request.uris, true)
+            else MediaStore.createDeleteRequest(app.contentResolver, request.uris)
         ConsentKind.MODIFY -> MediaStore.createWriteRequest(app.contentResolver, request.uris)
     }.intentSender
 
     /** Clears the request once the Activity has launched it, so a restarted collector cannot
      *  replay it and raise the confirmation dialog twice. */
     fun consumeDeletionRequest() {
-        synchronized(deletionLock) { pendingDeletion?.inFlight = true }
+        synchronized(deletionLock) {
+            pendingDeletion?.let {
+                it.inFlight = true
+                it.launchedAt = SystemClock.elapsedRealtime()
+            }
+        }
         _deletionRequest.value = null
     }
 
@@ -1639,6 +2044,12 @@ class ConversionEngine private constructor(context: Context) {
     companion object {
         private const val TAG = "ConversionEngine"
 
+        /** How often a held run looks again at the charger and the temperature. */
+        private const val HOLD_POLL_MS = 15_000L
+
+        /** How long a consent dialog must have been up before a resume counts it as dismissed. */
+        private const val ABANDONED_AFTER_MS = 2_000L
+
         /** Keeps the URI list well inside the binder transaction limit for one delete dialog. */
         private const val DELETE_BATCH_SIZE = 500
 
@@ -1655,6 +2066,9 @@ class ConversionEngine private constructor(context: Context) {
 
         /** Songs to convert before stopping to have their MP3s removed. */
         private const val MUSIC_DELETE_EVERY = 100
+
+        /** Songs encoded at once, cores allowing: each is latency-bound, so this is well above the core count would suggest. */
+        private const val MUSIC_WORKERS = 6
 
         private const val MB = 1024L * 1024
 
@@ -1685,6 +2099,8 @@ class ConversionEngine private constructor(context: Context) {
         const val NO_OPUS_ENCODER = "This device has no Opus encoder, so music cannot be converted."
 
         const val NO_ENCODER = "This device has no HEIC (HEVC) encoder, so nothing can be converted."
+        const val ENCODER_STALLED = "The HEIC encoder stopped responding, so the run was ended. " +
+            "Everything converted so far is kept. Close the app fully (swipe it away) and start again."
 
         // Holds the *application* context, so it lives exactly as long as the process it is
         // meant to: that is the point of putting the run here instead of in a ViewModel.

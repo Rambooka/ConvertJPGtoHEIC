@@ -1,6 +1,10 @@
 package com.example.convertjpgtoheic
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.ImageDecoder
 import android.media.AudioFormat
 import android.media.MediaCodec
 import android.media.MediaExtractor
@@ -10,6 +14,7 @@ import android.media.MediaMuxer
 import android.net.Uri
 import android.os.SystemClock
 import android.util.Log
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -27,12 +32,15 @@ data class SourceTrack(
     /** Bits per second, as MediaStore reports it; null when it does not know. */
     val bitrate: Long?,
 ) {
-    /** The converted file's name. It differs from the MP3's by extension, so both can sit side by side. */
+    /** The converted file's name. It differs from the original's by extension, so both can sit side by side. */
     val opusName: String get() = PhotoNaming.baseName(displayName) + ".opus"
 }
 
 /**
- * Re-encodes an MP3 as Opus in an Ogg file, named `.opus`.
+ * Re-encodes an MP3, an AAC song in an MP4 (`.m4a`) or a FLAC, as Opus in an Ogg file, named
+ * `.opus`. The tags come from ID3 for an MP3, from iTunes' `ilst` for an M4A ([M4aTags]) and from
+ * FLAC's own Vorbis comments ([FlacTags]); either way they arrive as Vorbis comments, and nothing
+ * after reading them differs.
  *
  * `.opus` rather than `.ogg`, although both are the same Ogg container: tag editors built on
  * jaudiotagger (Pulsar+, for one) take an `.ogg` to be Vorbis and refuse to open an Opus one
@@ -65,16 +73,29 @@ class MusicConverter(private val context: Context) {
         out.delete()
         scratch.delete()
         try {
-            val tags = readTags(track.uri)
-            val sourceUs = encode(track, scratch, onProgress)
+            // Only the cover: players show one picture, and some rips carry the whole booklet in
+            // every track (11 scans, 3.8 MB), which base64 grows by a third — enough that the copy
+            // came out no smaller than the MP3. Front covers sort first, so this is the one shown.
+            val read = readTags(track.uri).let { it.copy(pictures = it.pictures.take(1)) }
+            val shrunk = shrinkPictures(read)
+            val tags = shrunk.copy(pictures = OggOpus.withFrontCover(shrunk.pictures))
+            val comments = OggOpus.withYear(tags.comments) + tags.pictures.map(OggOpus::pictureComment)
+            // Checked before the encode, which would otherwise be wasted. The vendor string is
+            // the encoder's and not known yet; it is a few dozen bytes.
+            val tagBytes = OggOpus.commentPacketSize("", comments) + VENDOR_ALLOWANCE
+            if (tagBytes > OggOpus.MAX_PACKET_BYTES) {
+                throw Problem("its tags are too large for Android to read (${tagBytes / 1024 / 1024} MB)")
+            }
 
-            val comments = tags.comments + tags.pictures.map(OggOpus::pictureComment)
+            val sourceUs = encode(track, scratch, onProgress)
             scratch.inputStream().buffered().use { input ->
                 out.outputStream().buffered().use { output -> OggOpus.retag(input, output, comments) }
             }
             verify(out, tags, sourceUs)?.let { throw Problem(it) }
             return Outcome.Converted(out.length())
         } catch (e: Problem) {
+            // Logged as well as reported: the report is gone once the app is closed.
+            note("Not converting ${track.displayName}: ${e.message}")
             out.delete()
             return Outcome.Failed(e.message ?: "unknown")
         } catch (e: Exception) {
@@ -93,6 +114,8 @@ class MusicConverter(private val context: Context) {
         val input = resolver.openInputStream(uri) ?: throw Problem("it could not be opened")
         val v2 = input.use {
             val header = it.readNBytesCompat(10)
+            if (M4aTags.isMp4(header)) return readMp4Tags(uri)
+            if (FlacTags.isFlac(header)) return readFlacTags(uri)
             val length = Id3Tags.v2Length(header)
             when {
                 length == 0 -> null // no ID3v2 tag: perfectly ordinary
@@ -115,6 +138,16 @@ class MusicConverter(private val context: Context) {
         return Id3Tags.parse(v2, v1)
     }
 
+    private fun readFlacTags(uri: Uri): Id3Tags.Tags =
+        context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+            FlacTags.read(FdSource(pfd.fileDescriptor, pfd.statSize))
+        } ?: throw Problem("its tags could not be read")
+
+    private fun readMp4Tags(uri: Uri): Id3Tags.Tags =
+        context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+            M4aTags.read(FdSource(pfd.fileDescriptor, pfd.statSize))
+        } ?: throw Problem("its tags could not be read")
+
     private fun java.io.InputStream.readNBytesCompat(n: Int): ByteArray {
         val out = ByteArray(n)
         var done = 0
@@ -124,6 +157,58 @@ class MusicConverter(private val context: Context) {
             done += r
         }
         return out
+    }
+
+    // endregion
+
+    // region cover art
+
+    /**
+     * [tags] with each picture over [MAX_PICTURE_BYTES] re-encoded smaller; the rest are kept
+     * byte for byte.
+     *
+     * Pictures travel base64-encoded in the OpusTags packet, so anything much over 12 MB of art
+     * breaks [OggOpus.MAX_PACKET_BYTES] — and some albums carry 25 MB scans. A cover gains nothing
+     * from more than [MAX_PICTURE_SIDE] px anywhere it is shown.
+     */
+    private fun shrinkPictures(tags: Id3Tags.Tags): Id3Tags.Tags {
+        if (tags.pictures.none { it.data.size > MAX_PICTURE_BYTES }) return tags
+        return tags.copy(pictures = tags.pictures.map { if (it.data.size > MAX_PICTURE_BYTES) shrink(it) else it })
+    }
+
+    /** [picture] as a JPEG at most [MAX_PICTURE_SIDE] px on its long side, or as it was if that is no smaller. */
+    private fun shrink(picture: Id3Tags.Picture): Id3Tags.Picture {
+        val bitmap = try {
+            ImageDecoder.decodeBitmap(ImageDecoder.createSource(ByteBuffer.wrap(picture.data))) { decoder, info, _ ->
+                // Decoded straight to the target size, so a huge scan never needs its full-size bitmap.
+                val (w, h) = info.size.width to info.size.height
+                val scale = MAX_PICTURE_SIDE.toFloat() / maxOf(w, h)
+                if (scale < 1f) {
+                    decoder.setTargetSize((w * scale).roundToInt().coerceAtLeast(1), (h * scale).roundToInt().coerceAtLeast(1))
+                }
+                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not decode a ${picture.data.size}-byte ${picture.mime} picture", e)
+            throw Problem("its cover art (${picture.data.size / 1024 / 1024} MB) could not be read to shrink it")
+        }
+        try {
+            // JPEG has no alpha: flatten onto white, or transparent areas would come out black.
+            val opaque = if (!bitmap.hasAlpha()) bitmap else {
+                Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888).also {
+                    Canvas(it).apply { drawColor(Color.WHITE); drawBitmap(bitmap, 0f, 0f, null) }
+                }
+            }
+            val out = ByteArrayOutputStream()
+            opaque.compress(Bitmap.CompressFormat.JPEG, PICTURE_QUALITY, out)
+            if (opaque !== bitmap) opaque.recycle()
+            val data = out.toByteArray()
+            if (data.size >= picture.data.size) return picture
+            note("Cover art shrunk from ${picture.data.size} to ${data.size} bytes (${bitmap.width}x${bitmap.height})")
+            return picture.copy(mime = "image/jpeg", data = data)
+        } finally {
+            bitmap.recycle()
+        }
     }
 
     // endregion
@@ -140,28 +225,26 @@ class MusicConverter(private val context: Context) {
      * @return the source's decoded length in microseconds, to check the result against.
      */
     private fun encode(track: SourceTrack, out: File, onProgress: (Float) -> Unit): Long {
-        val extractor = MediaExtractor()
+        var input: Input? = null
         var decoder: MediaCodec? = null
         var encoder: MediaCodec? = null
         var muxer: MediaMuxer? = null
         var muxerStarted = false
         try {
-            context.contentResolver.openFileDescriptor(track.uri, "r")?.use { extractor.setDataSource(it.fileDescriptor) }
-                ?: throw Problem("it could not be opened")
-            val index = (0 until extractor.trackCount).firstOrNull {
-                extractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
-            } ?: throw Problem("it has no sound track")
-            extractor.selectTrack(index)
-            val inFormat = extractor.getTrackFormat(index)
+            val source = openInput(track).also { input = it }
+            val inFormat = source.format
             val mime = inFormat.getString(MediaFormat.KEY_MIME)!!
-            if (mime != MediaFormat.MIMETYPE_AUDIO_MPEG) throw Problem("it is $mime, not MP3")
+            if (mime !in SOURCE_MIMES) throw Problem("it is $mime, not MP3, AAC or FLAC")
             val expectedUs = if (inFormat.containsKey(MediaFormat.KEY_DURATION)) {
                 inFormat.getLong(MediaFormat.KEY_DURATION)
             } else {
                 track.durationMs * 1000
             }
 
-            val dec = MediaCodec.createDecoderByType(mime).also { decoder = it }
+            val dec = createDecoder(mime).also { decoder = it }
+            // 16-bit, which is all the pipeline takes: a 24-bit FLAC would otherwise come out of
+            // the decoder as float. MP3 and AAC decoders give 16-bit regardless.
+            inFormat.setInteger(MediaFormat.KEY_PCM_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
             dec.configure(inFormat, null, null, 0)
             dec.start()
 
@@ -172,6 +255,10 @@ class MusicConverter(private val context: Context) {
             var inRate = 0
             var decodedFrames = 0L
             var queuedFrames = 0L
+            // For the per-song log line: where samples go missing, if they do.
+            var extractorSamples = 0
+            var lastSampleUs = -1L
+            var firstOutputUs = -1L
             var muxerTrack = -1
             var extractorDone = false
             var decoderDone = false
@@ -179,6 +266,14 @@ class MusicConverter(private val context: Context) {
             var encoderDone = false
             var lastActivity = SystemClock.elapsedRealtime()
             var lastProgress = 0L
+
+            // Where the time goes, for the per-song log line: the pipeline's stages are polled in
+            // turn, so each lap is one stage's share.
+            val started = SystemClock.elapsedRealtime()
+            var tMark = System.nanoTime()
+            fun lap(): Long { val now = System.nanoTime(); val d = now - tMark; tMark = now; return d }
+            var tFeed = 0L; var tDecode = 0L; var tResample = 0L; var tEncodeIn = 0L; var tEncodeOut = 0L; var tIdle = 0L
+            var loops = 0L
 
             fun setUp(format: MediaFormat) {
                 val rate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
@@ -201,6 +296,12 @@ class MusicConverter(private val context: Context) {
                 val format48 = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, OPUS_RATE, ch).apply {
                     setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
                     setInteger(MediaFormat.KEY_COMPLEXITY, OPUS_COMPLEXITY)
+                    // Each hand-over to the encoder is a round trip to its process, ~1.5 ms, and
+                    // its default input buffer holds one 20 ms frame: 9,000 trips a song. Asking
+                    // for bigger buffers lets each trip carry many frames; the encoder (AOSP
+                    // C2SoftOpusEnc) still emits every frame as its own packet, which the Ogg
+                    // writer needs.
+                    setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, ENCODER_INPUT_SECONDS * OPUS_RATE * ch * 2)
                 }
                 val enc = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS).also { encoder = it }
                 enc.configure(format48, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
@@ -212,21 +313,25 @@ class MusicConverter(private val context: Context) {
             // pipeline at one buffer per stage per wait.
             while (!encoderDone) {
                 var moved = false
+                loops++
+                lap()
 
-                // Compressed MP3 frames into the decoder.
+                // Compressed frames into the decoder.
                 while (!extractorDone) {
                     val i = dec.dequeueInputBuffer(0)
                     if (i < 0) break
-                    val n = extractor.readSampleData(dec.getInputBuffer(i)!!, 0)
+                    val n = source.read(dec.getInputBuffer(i)!!)
                     if (n < 0) {
                         dec.queueInputBuffer(i, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                         extractorDone = true
                     } else {
-                        dec.queueInputBuffer(i, 0, n, extractor.sampleTime, 0)
-                        extractor.advance()
+                        lastSampleUs = source.timeUs
+                        extractorSamples++
+                        dec.queueInputBuffer(i, 0, n, lastSampleUs, 0)
                     }
                     moved = true
                 }
+                tFeed += lap()
 
                 // PCM out of the decoder, resampled, into the queue — unless the encoder is behind.
                 while (!decoderDone && pcm.size < MAX_PENDING_BYTES) {
@@ -238,6 +343,7 @@ class MusicConverter(private val context: Context) {
                     } else if (i >= 0) {
                         if (encoder == null) setUp(dec.outputFormat)
                         if (info.size > 0) {
+                            if (firstOutputUs < 0) firstOutputUs = info.presentationTimeUs
                             val buf = dec.getOutputBuffer(i)!!
                             buf.position(info.offset).limit(info.offset + info.size)
                             val frames = info.size / (2 * channels)
@@ -248,7 +354,9 @@ class MusicConverter(private val context: Context) {
                             } else {
                                 val shorts = ShortArray(frames * channels)
                                 buf.order(ByteOrder.nativeOrder()).asShortBuffer().get(shorts)
+                                val r0 = System.nanoTime()
                                 pcm.write(toPcm16(rs.process(FloatArray(shorts.size) { shorts[it] / 32768f }, frames)))
+                                tResample += System.nanoTime() - r0
                             }
                         }
                         dec.releaseOutputBuffer(i, false)
@@ -258,6 +366,8 @@ class MusicConverter(private val context: Context) {
                         }
                     }
                 }
+
+                tDecode += lap()
 
                 val enc = encoder
                 if (enc == null) {
@@ -282,6 +392,7 @@ class MusicConverter(private val context: Context) {
                         }
                         moved = true
                     }
+                    tEncodeIn += lap()
 
                     // Opus packets out of the encoder into the Ogg file.
                     while (!encoderDone) {
@@ -308,6 +419,7 @@ class MusicConverter(private val context: Context) {
                     }
                 }
 
+                tEncodeOut += lap()
                 val now = SystemClock.elapsedRealtime()
                 if (moved) {
                     lastActivity = now
@@ -316,6 +428,7 @@ class MusicConverter(private val context: Context) {
                 } else {
                     // The codecs work on their own threads; give them a moment.
                     Thread.sleep(IDLE_SLEEP_MS)
+                    tIdle += lap()
                 }
                 if (now - lastProgress > PROGRESS_MS && expectedUs > 0 && inRate > 0) {
                     lastProgress = now
@@ -326,7 +439,24 @@ class MusicConverter(private val context: Context) {
             if (!muxerStarted) throw Problem("the encoder produced nothing")
             muxer!!.stop()
             muxerStarted = false
-            return decodedFrames * 1_000_000 / inRate
+            val decodedUs = decodedFrames * 1_000_000 / inRate
+            note(
+                "${track.displayName}: ${dec.name} · $extractorSamples frames in, last at ${lastSampleUs / 1000} ms · " +
+                    "$decodedFrames samples out from ${firstOutputUs / 1000} ms = ${decodedUs / 1000} ms · " +
+                    "file says ${expectedUs / 1000} ms · took ${(SystemClock.elapsedRealtime() - started) / 1000.0} s: " +
+                    "feed ${sec(tFeed)} · decode ${sec(tDecode)} (resample ${sec(tResample)}) · encode in ${sec(tEncodeIn)} · " +
+                    "encode out ${sec(tEncodeOut)} · idle ${sec(tIdle)} · $loops loops",
+            )
+            // The copy is later checked against what was decoded, so what was decoded has to be the
+            // whole song: Samsung's FLAC extractor once ended streams up to 47 s early, unnoticed.
+            val exact = (source as? FlacInput)?.totalSamples?.takeIf { it > 0 }
+            if (exact != null && decodedFrames != exact) {
+                throw Problem("only $decodedFrames of its $exact samples could be decoded")
+            }
+            if (expectedUs > 0 && decodedUs < expectedUs - maxOf(LENGTH_SLACK_US, expectedUs / LENGTH_SLACK_DIVISOR)) {
+                throw Problem("only %.1f s of its %.1f s could be decoded".format(decodedUs / 1e6, expectedUs / 1e6))
+            }
+            return decodedUs
         } finally {
             runCatching { if (muxerStarted) muxer?.stop() }
             runCatching { muxer?.release() }
@@ -334,8 +464,121 @@ class MusicConverter(private val context: Context) {
             runCatching { encoder?.release() }
             runCatching { decoder?.stop() }
             runCatching { decoder?.release() }
-            runCatching { extractor.release() }
+            runCatching { input?.close() }
         }
+    }
+
+    /** Compressed frames for the decoder: the platform's extractor's, or for FLAC, [FlacFrames]'. */
+    private interface Input : AutoCloseable {
+        val format: MediaFormat
+
+        /** Writes the next frame into [into] from its start: its size, or -1 at the end. Its time is then [timeUs]. */
+        fun read(into: ByteBuffer): Int
+
+        val timeUs: Long
+    }
+
+    private fun openInput(track: SourceTrack): Input {
+        val pfd = context.contentResolver.openFileDescriptor(track.uri, "r") ?: throw Problem("it could not be opened")
+        try {
+            val src = FdSource(pfd.fileDescriptor, pfd.statSize)
+            if (src.size >= 4 && FlacTags.isFlac(src.read(0, 4))) return FlacInput(pfd, src)
+            val extractor = MediaExtractor()
+            try {
+                extractor.setDataSource(pfd.fileDescriptor)
+                val index = (0 until extractor.trackCount).firstOrNull {
+                    extractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
+                } ?: throw Problem("it has no sound track")
+                extractor.selectTrack(index)
+                return ExtractorInput(extractor, extractor.getTrackFormat(index))
+            } catch (e: Exception) {
+                extractor.release()
+                throw e
+            } finally {
+                pfd.close() // the extractor holds its own duplicate
+            }
+        } catch (e: Exception) {
+            runCatching { pfd.close() }
+            throw e
+        }
+    }
+
+    private class ExtractorInput(private val extractor: MediaExtractor, override val format: MediaFormat) : Input {
+        override var timeUs = 0L
+            private set
+
+        override fun read(into: ByteBuffer): Int {
+            val n = extractor.readSampleData(into, 0)
+            if (n >= 0) {
+                timeUs = extractor.sampleTime
+                extractor.advance()
+            }
+            return n
+        }
+
+        override fun close() = extractor.release()
+    }
+
+    /** A FLAC read frame by frame with [FlacFrames], every frame checked, none missed. */
+    private inner class FlacInput(private val pfd: android.os.ParcelFileDescriptor, src: FdSource) : Input {
+        private val info: FlacFrames.StreamInfo
+        private val reader: FlacFrames.Reader
+        val totalSamples: Long get() = info.totalSamples
+
+        init {
+            val (streamInfo, start) = FlacFrames.open(src) ?: throw Problem("its FLAC header could not be read")
+            info = streamInfo
+            reader = FlacFrames.Reader(src, info, start)
+        }
+
+        override val format: MediaFormat = MediaFormat.createAudioFormat(
+            MediaFormat.MIMETYPE_AUDIO_FLAC, info.sampleRate, info.channels,
+        ).apply {
+            setByteBuffer("csd-0", ByteBuffer.wrap(FlacFrames.codecConfig(info)))
+            setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, if (info.maxFrameSize > 0) info.maxFrameSize + 1024 else FLAC_INPUT_FALLBACK)
+            if (info.totalSamples > 0) setLong(MediaFormat.KEY_DURATION, info.totalSamples * 1_000_000 / info.sampleRate)
+        }
+
+        override var timeUs = 0L
+            private set
+
+        override fun read(into: ByteBuffer): Int {
+            val frame = try {
+                reader.next() ?: return -1
+            } catch (e: FlacFrames.FormatException) {
+                throw Problem("its FLAC frames could not be read (${e.message})")
+            }
+            if (frame.length > into.capacity()) throw Problem("a FLAC frame (${frame.length} bytes) is larger than the decoder takes")
+            into.clear()
+            into.put(reader.bytes(frame))
+            timeUs = frame.firstSample * 1_000_000 / info.sampleRate
+            return frame.length
+        }
+
+        override fun close() = pfd.close()
+    }
+
+    /**
+     * The decoder for [mime]: the platform's own for FLAC, the device's default for the rest.
+     *
+     * [FlacInput] feeds it what the platform's FLAC decoder is written for: STREAMINFO as its
+     * configuration, then one whole frame per buffer. Samsung's decoder is only known to have been
+     * fed by Samsung's extractor, which is the part found losing audio.
+     */
+    private fun createDecoder(mime: String): MediaCodec {
+        if (mime == MediaFormat.MIMETYPE_AUDIO_FLAC) {
+            runCatching { return MediaCodec.createByCodecName(AOSP_FLAC_DECODER) }
+                .onFailure { Log.w(TAG, "$AOSP_FLAC_DECODER unavailable; using the default", it) }
+        }
+        return MediaCodec.createDecoderByType(mime)
+    }
+
+    private fun sec(nanos: Long): String = "%.1f".format(nanos / 1e9)
+
+    /** To logcat and the run's own log. */
+    private fun note(message: String) {
+        Log.i(TAG, message)
+        RunLog.line(message)
     }
 
     /** Float samples to 16-bit PCM in the platform's byte order, which is what MediaCodec expects. */
@@ -436,8 +679,25 @@ class MusicConverter(private val context: Context) {
     companion object {
         private const val TAG = "MusicConverter"
 
+        /** What the platform's decoders are asked to take: MP3, AAC (`audio/mp4a-latm`) from an M4A, and FLAC. */
+        private val SOURCE_MIMES = setOf(
+            MediaFormat.MIMETYPE_AUDIO_MPEG, MediaFormat.MIMETYPE_AUDIO_AAC, MediaFormat.MIMETYPE_AUDIO_FLAC,
+        )
+
+        private const val AOSP_FLAC_DECODER = "c2.android.flac.decoder"
+
+        /** Decoder input size for a FLAC whose STREAMINFO does not give its largest frame. */
+        private const val FLAC_INPUT_FALLBACK = 1024 * 1024
+
+        /** How much shorter than its container says a decode may come out: 1 s or 2%, whichever is more. */
+        private const val LENGTH_SLACK_US = 1_000_000L
+        private const val LENGTH_SLACK_DIVISOR = 50
+
         private const val OPUS_RATE = 48_000
         private const val OPUS_COMPLEXITY = 10
+
+        /** Audio per encoder input buffer, if the codec honours the request. */
+        private const val ENCODER_INPUT_SECONDS = 1
 
         private const val BITRATE_SHARE = 0.75
         private const val MIN_BITRATE = 64_000
@@ -454,6 +714,14 @@ class MusicConverter(private val context: Context) {
 
         /** Far beyond any real tag, cover art included; guards against a corrupt size field. */
         private const val MAX_TAG_BYTES = 64 * 1024 * 1024
+
+        /** Pictures up to this size are kept as they are; ordinary album art is well under it. */
+        private const val MAX_PICTURE_BYTES = 2 * 1024 * 1024
+        private const val MAX_PICTURE_SIDE = 2000
+        private const val PICTURE_QUALITY = 90
+
+        /** Room for the encoder's vendor string ("libopus 1.x", in practice) in the size check. */
+        private const val VENDOR_ALLOWANCE = 1024L
 
         private const val DURATION_SLACK_US = 250_000L
         private const val DURATION_SLACK_FRACTION = 0.005

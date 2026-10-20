@@ -2,11 +2,14 @@ package com.example.convertjpgtoheic
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.util.Base64
 
 class OggOpusTest {
@@ -38,6 +41,78 @@ class OggOpusTest {
     }
 
     private val audio = List(5) { i -> ByteArray(100 + i * 37) { (it * 7 + i).toByte() } }
+
+    @Test
+    fun `the first picture becomes the front cover only when there is none`() {
+        fun pic(type: Int) = Id3Tags.Picture("image/jpeg", type, "", byteArrayOf(type.toByte()))
+        assertEquals(listOf(3, 0), OggOpus.withFrontCover(listOf(pic(255), pic(0))).map { it.type })
+        assertEquals(listOf(3, 255), OggOpus.withFrontCover(listOf(pic(3), pic(255))).map { it.type })
+        assertEquals(listOf(0, 3), OggOpus.withFrontCover(listOf(pic(0), pic(3))).map { it.type })
+        assertEquals(emptyList<Int>(), OggOpus.withFrontCover(emptyList()).map { it.type })
+    }
+
+    @Test
+    fun `retagging keeps the audio identical, and any change to it is caught`() {
+        val original = stream(audio)
+        val retagged = ByteArrayOutputStream().also {
+            OggOpus.retag(ByteArrayInputStream(original), it, listOf("DATE" to "2013", "YEAR" to "2013"))
+        }.toByteArray()
+        assertTrue(OggOpus.sameAudio(ByteArrayInputStream(original), ByteArrayInputStream(retagged)))
+
+        val changed = audio.toMutableList().also { it[2] = it[2].copyOf().apply { this[5] = (this[5] + 1).toByte() } }
+        assertFalse(OggOpus.sameAudio(ByteArrayInputStream(original), ByteArrayInputStream(stream(changed))))
+        assertFalse(OggOpus.sameAudio(ByteArrayInputStream(original), ByteArrayInputStream(stream(audio.dropLast(1)))))
+    }
+
+    /** Skipped unless `OPUS_SAMPLES_DIR` names a folder of `.opus` files; repaired copies go to `<dir>/repaired/`. */
+    @Test
+    fun `the music repair works on real files`() {
+        val dir = System.getenv("OPUS_SAMPLES_DIR")?.let(::File)
+        assumeTrue("set OPUS_SAMPLES_DIR to run", dir != null && dir.isDirectory)
+        val out = File(dir, "repaired").apply { mkdirs() }
+        for (f in dir!!.listFiles { f -> f.name.endsWith(".opus") }!!.sorted()) {
+            val before = OggOpus.readComments(f.inputStream().buffered()).second
+            val fix = MusicRepair.diagnose(before) as? MusicRepair.Diagnosis.Needs ?: continue
+            val repaired = File(out, f.name)
+            f.inputStream().buffered().use { i -> repaired.outputStream().buffered().use { o -> OggOpus.retag(i, o, fix.comments) } }
+            val after = OggOpus.readComments(repaired.inputStream().buffered()).second
+            println("${f.name}: ${f.length()} -> ${repaired.length()} bytes, YEAR=${after.first { it.first == "YEAR" }.second}")
+            assertEquals(fix.comments, after)
+            assertTrue(OggOpus.sameAudio(f.inputStream().buffered(), repaired.inputStream().buffered()))
+        }
+    }
+
+    @Test
+    fun `the music repair adds a year only where one can be had`() {
+        assertEquals(MusicRepair.Diagnosis.Fine, MusicRepair.diagnose(listOf("DATE" to "2013", "YEAR" to "2013")))
+        assertEquals(MusicRepair.Diagnosis.NoDate, MusicRepair.diagnose(listOf("TITLE" to "Untitled")))
+        assertEquals(
+            MusicRepair.Diagnosis.Needs(listOf("TITLE" to "Move", "DATE" to "2013-11-08", "YEAR" to "2013")),
+            MusicRepair.diagnose(listOf("TITLE" to "Move", "DATE" to "2013-11-08")),
+        )
+    }
+
+    @Test
+    fun `a YEAR is added from DATE for Android's music library`() {
+        fun year(vararg c: Pair<String, String>) = OggOpus.withYear(c.toList()).filter { it.first == "YEAR" }.map { it.second }
+        assertEquals(listOf("2013"), year("DATE" to "2013-11-08"))
+        assertEquals(listOf("2003"), year("DATE" to "2003"))
+        assertEquals(listOf("1999"), year("YEAR" to "1999", "DATE" to "2013")) // an existing YEAR wins
+        assertEquals(emptyList<String>(), year("DATE" to "20131108")) // not a year
+        assertEquals(emptyList<String>(), year("DATE" to "Summer"))
+        assertEquals(emptyList<String>(), year("TITLE" to "No date"))
+    }
+
+    @Test
+    fun `comment packet size is predicted exactly`() {
+        val comments = listOf("TITLE" to "Café del Mar", "ARTIST" to "Ünïcødé", "EMPTY" to "")
+        for (c in listOf(emptyList(), comments)) {
+            assertEquals(
+                OggOpus.commentPacket("libopus 1.4", c).size.toLong(),
+                OggOpus.commentPacketSize("libopus 1.4", c),
+            )
+        }
+    }
 
     @Test
     fun `retag writes the comments and leaves the audio alone`() {
