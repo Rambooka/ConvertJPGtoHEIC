@@ -2,7 +2,14 @@
     <string name="app_name">Convert Media by Ray</string>
 
     <string name="section_range">Date range</string>
-    <string name="section_options">Options</string>
+    <string name="app_tagline">Shrinks the pictures, videos and music on this phone in place.</string>
+    <string name="section_range_hint">For pictures and videos. Music is always the whole library.</string>
+    <string name="section_pictures">Picture options</string>
+    <string name="section_every_run">Every run</string>
+    <string name="section_convert">Convert</string>
+    <string name="section_progress">Progress</string>
+    <string name="section_result">Result</string>
+    <string name="section_maintenance">Repair and tidy up</string>
 
     <string name="pick_range">Pick date range</string>
     <string name="range_none">No range selected</string>

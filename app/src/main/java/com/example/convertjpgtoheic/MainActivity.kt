@@ -28,6 +28,7 @@ import com.example.convertjpgtoheic.databinding.ActivityMainBinding
 import com.example.convertjpgtoheic.databinding.ItemFailedPhotoBinding
 import com.example.convertjpgtoheic.databinding.ItemUndatedPhotoBinding
 import com.google.android.material.datepicker.MaterialDatePicker
+import com.google.android.material.color.DynamicColors
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
@@ -108,6 +109,8 @@ class MainActivity : AppCompatActivity() {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
+        // The phone's own Material You colours, from its wallpaper, where it offers them.
+        DynamicColors.applyToActivityIfAvailable(this)
         setContentView(binding.root)
 
         ViewCompat.setOnApplyWindowInsetsListener(binding.main) { v, insets ->
@@ -754,6 +757,10 @@ class MainActivity : AppCompatActivity() {
         binding.rangeButton.isEnabled = !busy
         binding.cancelButton.isVisible(state is UiState.Working || state is UiState.AwaitingDeletion)
         binding.reshowPromptButton.isVisible(state is UiState.AwaitingDeletion)
+        // The progress card appears for a run and stays for its results; the list of failures
+        // and the log button live in it too.
+        binding.progressCard.isVisible(busy || state is UiState.Finished)
+        binding.progressHeading.setText(if (state is UiState.Finished) R.string.section_result else R.string.section_progress)
         // Screen off, Samsung confines the app to the slow cores — a song then takes ten times as long.
         binding.root.keepScreenOn = busy && settings.keepScreenOn
         binding.progressBar.isVisible(busy)
@@ -790,6 +797,9 @@ class MainActivity : AppCompatActivity() {
                 binding.progressBar.isIndeterminate = false
                 binding.progressBar.max = state.progress.total
                 binding.progressBar.setProgressCompat(state.progress.done, true)
+                val item = state.progress.itemFraction
+                binding.itemProgress.isVisible(item > 0f)
+                if (item > 0f) binding.itemProgress.setProgressCompat((item * 100).toInt(), true)
                 val text = when (state.mode) {
                     RunMode.CLEAN_UP, RunMode.DELETE_PROTECTED -> getString(R.string.progress_cleanup)
                     RunMode.REPAIR -> repairStatus(state.progress)
@@ -803,6 +813,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             is UiState.AwaitingDeletion -> {
+                binding.itemProgress.isVisible(false)
                 binding.progressBar.isIndeterminate = false
                 binding.progressBar.max = state.total
                 binding.progressBar.setProgressCompat(state.done, true)
@@ -822,6 +833,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             is UiState.Finished -> {
+                binding.itemProgress.isVisible(false)
                 binding.statusText.text = ""
                 binding.resultText.text = describe(state.report)
                 showFailures(state.report)
